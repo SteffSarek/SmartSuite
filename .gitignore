@@ -179,3 +179,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+Smartsuite/AstroData/bright_asteroids.txt
+Smartsuite/AstroData/cache_asteroiden.pkl
+Smartsuite/AstroData/cache_asteroiden_raw.pkl
+/Smartsuite/AstroData

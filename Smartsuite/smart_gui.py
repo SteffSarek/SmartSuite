@@ -143,7 +143,7 @@ class AboutWindow(ctk.CTkToplevel):
         ctk.CTkLabel(self.container, text="SmartSuite", font=("Arial", 24, "bold")).pack(pady=(0, 5))
         ctk.CTkLabel(self.container, text=f"Version {self.current_version}", font=("Arial", 16)).pack(pady=(0, 20))
         
-        info = "Smart Teleskop\nImport / Archivierung und Analyse\n\nCopyright © 2025-2026 Stefan Raphael\n\nThis program comes with absolute no warranty."
+        info = "Smart Teleskop\nImport / Archivierung / Analyse / Planung\n\nCopyright © 2025-2026 Stefan Raphael\n\nThis program comes with absolute no warranty."
         ctk.CTkLabel(self.container, text=info, justify="center", text_color="gray80").pack(pady=(0, 20))
         
         link_f = ctk.CTkFont(family="Arial", size=12, underline=True)
@@ -195,7 +195,9 @@ class AboutWindow(ctk.CTkToplevel):
 class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, parent, current_version):
         super().__init__(parent)
-        self.title("Einstellungen"); self.geometry("750x650"); self.version = current_version
+        
+        # --- HIER ÄNDERN (aus 650 mach 850) ---
+        self.title("Einstellungen"); self.geometry("750x850"); self.version = current_version
         
         apply_safe_focus(self)
         

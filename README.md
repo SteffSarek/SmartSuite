@@ -1,9 +1,7 @@
 🔭 SmartSuite
 Der All-in-One Werkzeugkasten für Astrofotografen mit Smart-Teleskopen.
 Die SmartSuite ist eine mächtige Python-Desktopanwendung, die den gesamten Workflow vor und nach der eigentlichen Bildaufnahme abdeckt. Egal ob du deine Rohdaten (FITS) vom ZWO Seestar (S50/S30) oder Dwarf (II/3) importieren, schlechte Bilder per KI-gestütztem "Smart Score" aussortieren oder das nächste seltene Himmelsereignis planen möchtest – die SmartSuite bündelt alle nötigen Tools unter einer modernen, dunklen Benutzeroberfläche.
-![alt text](https://via.placeholder.com/800x450.png?text=Hier+ein+Screenshot+der+SmartSuite+einfuegen)
 
-(Tipp: Füge hier später einen Screenshot des Programms ein – z.B. von der Metrik-Analyse!)
 ✨ Hauptfunktionen
 📥 Smart Import & Archivierung: Liest Rohdaten direkt vom Teleskop oder USB-Stick, erkennt das Ziel anhand der FITS-Header und sortiert sie automatisch in eine saubere Projektstruktur. Unterstützt Mosaik-Routing und N.I.N.A.-Header Fixes.
 📊 Deep Sky Metrik-Analyse: Scannt hunderte FITS-Bilder in Sekunden. Berechnet FWHM, Exzentrizität, SNR, Hintergrundrauschen und Sternenanzahl. Ein berechneter "Smart Score" hilft dir, Ausreißer (z.B. durch Wind oder Wolken) vollautomatisch auszusortieren.
@@ -22,7 +20,7 @@ Wenn du den Code ausführen, untersuchen oder erweitern möchtest:
 Klone dieses Repository:
 code
 Bash
-git clone https://github.com/DEIN_GITHUB_NAME/SmartSuite.git
+git clone https://github.com/SteffSarek/SmartSuite.git
 Installiere die benötigten Python-Bibliotheken. (Tipp: Nutze ein Virtual Environment!):
 code
 Bash

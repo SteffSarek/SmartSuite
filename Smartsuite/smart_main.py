@@ -1,11 +1,11 @@
 # ==============================================================================
-# SMART_MAIN.PY - Startpunkt (V3.0.0: SmartScore & Python Scripts)
+# SMART_MAIN.PY - Startpunkt (V1.0.0: GitHub Release)
 # ==============================================================================
 import smart_gui
 import sys
 
-# Version 3.0.0 Release
-CURRENT_VERSION = "3.0"
+# Version 1.0.0 Release
+CURRENT_VERSION = "1.0"
 
 if __name__ == "__main__":
     start_mode = None

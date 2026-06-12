@@ -1,5 +1,5 @@
 # ==============================================================================
-# SMART_UTILS.PY - Logik und Hilfsfunktionen (V2.0.0)
+# SMART_UTILS.PY - Logik und Hilfsfunktionen (V1.0.0)
 # ==============================================================================
 import os
 import json
@@ -216,16 +216,27 @@ def apply_nina_fix(filepath):
         return False
     return False
 
-# --- UPDATE LOGIK ---
+# --- UPDATE LOGIK (GITHUB INTEGRATION) ---
+GITHUB_USER = "SteffSarek" # <-- HIER DEINEN GITHUB NAMEN EINTRAGEN (z.B. "StefanAstro")
+GITHUB_REPO = "SmartSuite"     # Der Name deines Repositories auf Github
+
 def get_remote_version():
-    """Lädt die Versionsnummer sauber als UTF-8 String."""
+    """Lädt die Versionsnummer vom aktuellsten GitHub Release."""
+    import json
+    import urllib.request
+    url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/releases/latest"
     try:
-        with urllib.request.urlopen(VERSION_FILE_URL, timeout=3) as response:
-            content = response.read().decode('utf-8').strip()
-            return content
+        # GitHub API verlangt einen User-Agent Header, sonst wird die Anfrage blockiert
+        req = urllib.request.Request(url, headers={'User-Agent': 'SmartSuite-App'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            return data.get("tag_name", "") # Liefert den Namen deines Tags, z.B. "v1.1" oder "1.1"
     except Exception as e:
-        log.error(f"Update-Check Fehler: Konnte externe Version nicht abrufen. Grund: {e}")
+        log.error(f"GitHub Update-Check Fehler: Konnte externe Version nicht abrufen. Grund: {e}")
         return None
 
 def open_update_folder():
-    webbrowser.open(UPDATE_FOLDER_URL)
+    """Öffnet die Release-Seite auf GitHub im Standard-Browser."""
+    import webbrowser
+    url = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}/releases/latest"
+    webbrowser.open(url)

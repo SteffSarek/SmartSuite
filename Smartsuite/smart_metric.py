@@ -1,5 +1,5 @@
 # ==============================================================================
-# SMART_METRIC.PY - Metrische Analyse V2.0.0 (Python Scripts & Background Sync)
+# SMART_METRIC.PY - Metrische Analyse V1.0.0 (GitHub Release)
 # ==============================================================================
 import tkinter as tk
 import customtkinter as ctk

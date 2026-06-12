@@ -1,5 +1,5 @@
 # ==============================================================================
-# SMART_GUI.PY - Benutzeroberfläche (V2.5.0)
+# SMART_GUI.PY - Benutzeroberfläche (V1.0)
 # ==============================================================================
 import tkinter as tk
 import tkinter.font as tkfont
@@ -161,8 +161,8 @@ class AboutWindow(ctk.CTkToplevel):
         self.btn_check_update.pack(pady=5)
         ToolTip(self.btn_check_update, "Sucht online nach einer neuen Version")
         
-        self.btn_download = ctk.CTkButton(self.update_frame, text="⬇  Zum Download Ordner", fg_color="green", text_color="white", command=utils.open_update_folder)
-        ToolTip(self.btn_download, "Öffnet den Google Drive Ordner")
+        self.btn_download = ctk.CTkButton(self.update_frame, text="⬇  Update auf GitHub herunterladen", fg_color="#27ae60", text_color="white", command=utils.open_update_folder)
+        ToolTip(self.btn_download, "Öffnet die Release-Seite des Projekts auf GitHub")
 
         ctk.CTkButton(self.container, text="Schließen", width=200, command=self.close_window).pack(side="bottom", pady=10)
 
@@ -424,7 +424,7 @@ class SubfolderActionDialog(ctk.CTkToplevel):
 
 # --- HAUPTANWENDUNG ---
 class SmartSuiteApp(ctk.CTk):
-    def __init__(self, version_string="2.0.0", start_mode=None, start_path=None): 
+    def __init__(self, version_string="1.0", start_mode=None, start_path=None):
         super().__init__()
         self.version = version_string
         self.settings_window = None

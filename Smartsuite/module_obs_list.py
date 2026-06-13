@@ -49,6 +49,12 @@ OBS_FILE = "smartsuite_obslist.json"
 def normalize_string(s):
     return s.lower().replace(" ", "").replace("_", "").replace("-", "")
 
+# --- NEU: Globale Kompass-Umrechnung ---
+def az_to_compass(az):
+    dirs = ["N", "NNO", "NO", "ONO", "O", "OSO", "SO", "SSO", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    idx = int((az + 11.25) / 22.5) % 16
+    return dirs[idx]
+
 def load_list():
     if os.path.exists(OBS_FILE):
         try:
@@ -750,103 +756,96 @@ class ObsListFrame(ctk.CTkFrame):
         hint_radar.bind("<Button-1>", self.open_cloud_radar)
 
     def generate_night_plan(self, targets):
-        """Erstellt einen sequenziellen Zeitplan für die heutige Nacht."""
+        """Erstellt ZWEI getrennte Zeitpläne (Nord/Süd) für die heutige Nacht."""
         cfg = utils.load_config()
         lat = float(cfg.get("default_lat", 51.16))
         lon = float(cfg.get("default_lon", 10.45))
         loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg)
         local_tz = pytz.timezone('Europe/Berlin')
 
-        # FIX: Zeitzone explizit setzen, sonst rechnet Astropy mit falschem UTC-Offset!
         now = datetime.now(local_tz)
-        
-        # Planung startet "jetzt" (wenn es Nacht ist) oder zum nächsten Abend
         if now.hour >= 17 or now.hour < 6:
             start_dt = now
         else:
             start_dt = now.replace(hour=18, minute=0, second=0, microsecond=0)
 
-        # Berechne den Sonnenstand für die nächsten 15 Stunden (in 15-Minuten-Schritten)
         times_local = [start_dt + timedelta(minutes=15*i) for i in range(60)]
-        astro_times = Time(times_local) # Astropy konvertiert das jetzt korrekt!
+        astro_times = Time(times_local)
         sun_altaz = get_sun(astro_times).transform_to(AltAz(obstime=astro_times, location=loc))
 
-        # Bürgerliche Dämmerung (-6°)
         dark_indices = [i for i, alt in enumerate(sun_altaz.alt.deg) if alt < -6]
-
-        if not dark_indices: return [] # Wenn die Sonne nachts nicht unter -6° sinkt
+        if not dark_indices: return {"Süd": [], "Nord": []}
 
         first_dark = times_local[dark_indices[0]]
         last_dark = times_local[dark_indices[-1]]
 
-        # Der Plan startet frühestens, wenn es dunkel ist, oder "jetzt"
         plan_start = max(first_dark, now)
-        # Auf die nächste volle 15-Minuten-Grenze aufrunden
         mins = 15 * math.ceil(plan_start.minute / 15)
         plan_start = plan_start.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=mins)
 
-        # Falls der Start bereits nach der Dämmerung am Morgen liegt
-        if plan_start >= last_dark: return []
+        if plan_start >= last_dark: return {"Süd": [], "Nord": []}
 
         valid_targets = [t for t in targets if t.get('ra') is not None]
-        plan = []
-        current_time = plan_start
 
-        scheduled_counts = {t['name']: 0 for t in valid_targets}
+        # Interne Hilfsfunktion für den doppelten Durchlauf (einmal Nord, einmal Süd)
+        def build_plan_for_hemisphere(is_south):
+            plan = []
+            current_time = plan_start
+            scheduled_counts = {t['name']: 0 for t in valid_targets}
 
-        # Fülle die Zeitslots exakt bis zum Morgengrauen (last_dark)
-        while current_time < last_dark:
-            # Wie viel Zeit bleibt noch bis zum Hellwerden?
-            time_left = last_dark - current_time
-            
-            # Wenn weniger als 20 Minuten Restzeit sind, lohnt sich kein Schwenk mehr
-            if time_left < timedelta(minutes=20): 
-                break 
+            while current_time < last_dark:
+                time_left = last_dark - current_time
+                if time_left < timedelta(minutes=20): break 
+                
+                actual_duration = min(timedelta(hours=1, minutes=30), time_left)
+                mid_time = current_time + (actual_duration / 2)
+                mid_astro = Time(mid_time)
 
-            # Am Ende der Nacht wird der Block passend gekürzt! Sonst immer max 1.5h
-            actual_duration = min(timedelta(hours=1, minutes=30), time_left)
-            
-            # Wir prüfen die Höhe zur echten Mitte der Session
-            mid_time = current_time + (actual_duration / 2)
-            mid_astro = Time(mid_time)
+                best_target = None
+                best_score = -9999
 
-            best_target = None
-            best_score = -9999
+                for t in valid_targets:
+                    coord = SkyCoord(ra=t['ra']*u.deg, dec=t['dec']*u.deg)
+                    altaz = coord.transform_to(AltAz(obstime=mid_astro, location=loc))
+                    alt = altaz.alt.deg
+                    az = altaz.az.deg
 
-            for t in valid_targets:
-                coord = SkyCoord(ra=t['ra']*u.deg, dec=t['dec']*u.deg)
-                alt = coord.transform_to(AltAz(obstime=mid_astro, location=loc)).alt.deg
+                    # Filter Nord/Süd (Süd ist alles zwischen 90°(Osten) und 270°(Westen))
+                    target_is_south = (90 <= az <= 270)
+                    if is_south and not target_is_south: continue
+                    if not is_south and target_is_south: continue
 
-                if alt > 5: # Absolutes Minimum für südliche Objekte
-                    current_score = t.get('score', 0)
-                    
-                    # Höhen-Bonus
-                    if alt >= 20:
-                        current_score += (alt * 2) 
-                    else:
-                        current_score -= ((20 - alt) * 5) 
+                    if alt > 5:
+                        current_score = t.get('score', 0)
+                        if alt >= 20: current_score += (alt * 2) 
+                        else: current_score -= ((20 - alt) * 5) 
+                        current_score -= (scheduled_counts[t['name']] * 150)
 
-                    # Strafe für bereits geplante Objekte
-                    current_score -= (scheduled_counts[t['name']] * 150)
+                        if current_score > best_score:
+                            best_score = current_score
+                            best_target = t
+                            best_target['_temp_alt'] = alt
+                            best_target['_temp_az'] = az # Speichere den Azimut für den Kompass
 
-                    if current_score > best_score:
-                        best_score = current_score
-                        best_target = t
-                        best_target['_temp_alt'] = alt
+                if best_target:
+                    plan.append({
+                        "start": current_time,
+                        "end": current_time + actual_duration,
+                        "target": best_target,
+                        "alt": best_target['_temp_alt'],
+                        "az": best_target['_temp_az']
+                    })
+                    scheduled_counts[best_target['name']] += 1
+                    current_time += actual_duration
+                else:
+                    current_time += timedelta(minutes=30)
+            return plan
 
-            if best_target:
-                plan.append({
-                    "start": current_time,
-                    "end": current_time + actual_duration,
-                    "target": best_target,
-                    "alt": best_target['_temp_alt']
-                })
-                scheduled_counts[best_target['name']] += 1
-                current_time += actual_duration
-            else:
-                current_time += timedelta(minutes=30)
-
-        return plan
+        # Wir geben ein Dictionary mit beiden fertigen Plänen zurück
+        return {
+            "Süd": build_plan_for_hemisphere(is_south=True),
+            "Nord": build_plan_for_hemisphere(is_south=False)
+        }
     
     def render_tonight_tab(self):
         for widget in self.scroll_tonight.winfo_children(): widget.destroy()
@@ -870,44 +869,50 @@ class ObsListFrame(ctk.CTkFrame):
             for e in events_today:
                 ctk.CTkLabel(e_frame, text=f"{e.get('icon','')} {e['title']} - {e['time']}\n{e['desc']}", justify="left").pack(anchor="w", padx=10, pady=(5,10))
                 
-        # --- NEU: DER SEQUENZIELLE SMART-TELESKOP PLAN ---
-        night_plan = []
+        # --- TELESKOP-PLÄNE (NORD & SÜD) ---
+        night_plans = {"Süd": [], "Nord": []}
         if self.last_targets:
-            night_plan = self.generate_night_plan(self.last_targets)
+            night_plans = self.generate_night_plan(self.last_targets)
             
         t_frame = ctk.CTkFrame(self.scroll_tonight, fg_color="#1a1a1a", border_width=1, border_color="#2ecc71", corner_radius=8)
         t_frame.pack(fill="x", padx=10, pady=10)
         ctk.CTkLabel(t_frame, text="Teleskop-Plan für Heute Nacht (je 1,5 Std)", font=("Arial", 14, "bold"), text_color="#2ecc71").pack(anchor="w", padx=10, pady=(10,0))
         
-        if not night_plan:
+        if not night_plans.get("Süd") and not night_plans.get("Nord"):
             ctk.CTkLabel(t_frame, text="Keine gut sichtbaren Ziele auf deiner Liste oder Wetter zu schlecht/zu hell.", text_color="gray").pack(anchor="w", padx=10, pady=(5,10))
         else:
-            for idx, block in enumerate(night_plan):
-                s_str = block['start'].strftime('%H:%M')
-                e_str = block['end'].strftime('%H:%M')
-                t_name = block['target']['name']
-                alt = int(block['alt'])
+            for hemi in ["Süd", "Nord"]:
+                p_list = night_plans.get(hemi, [])
+                if not p_list: continue
                 
-                # Farb-Logik für die Blöcke
-                bg_color = "#242424" if idx % 2 == 0 else "#2a2a2a"
+                # Überschrift für die Himmelsrichtung
+                ctk.CTkLabel(t_frame, text=f"Blickrichtung {hemi}:", font=("Arial", 13, "bold"), text_color="#3498db").pack(anchor="w", padx=15, pady=(10,2))
                 
-                row_frame = ctk.CTkFrame(t_frame, fg_color=bg_color, corner_radius=4)
-                row_frame.pack(fill="x", padx=10, pady=4)
+                for idx, block in enumerate(p_list):
+                    s_str = block['start'].strftime('%H:%M')
+                    e_str = block['end'].strftime('%H:%M')
+                    t_name = block['target']['name']
+                    alt = int(block['alt'])
+                    comp = az_to_compass(block['az']) # Kompass-Richtung
+                    
+                    bg_color = "#242424" if idx % 2 == 0 else "#2a2a2a"
+                    row_frame = ctk.CTkFrame(t_frame, fg_color=bg_color, corner_radius=4)
+                    row_frame.pack(fill="x", padx=15, pady=4)
+                    
+                    time_lbl = ctk.CTkLabel(row_frame, text=f"🕒 {s_str} - {e_str}", font=("Consolas", 13, "bold"), text_color="#f39c12", width=130, anchor="w")
+                    time_lbl.pack(side="left", padx=10, pady=5)
+                    
+                    name_lbl = ctk.CTkLabel(row_frame, text=t_name, font=("Arial", 14, "bold"), text_color="#ecf0f1")
+                    name_lbl.pack(side="left", padx=10, pady=5)
+                    
+                    alt_lbl = ctk.CTkLabel(row_frame, text=f"(Ø Höhe: {alt}°, Richtung: {comp})", font=("Arial", 12), text_color="#7f8c8d")
+                    alt_lbl.pack(side="left", padx=5, pady=5)
                 
-                time_lbl = ctk.CTkLabel(row_frame, text=f"🕒 {s_str} - {e_str}", font=("Consolas", 13, "bold"), text_color="#f39c12", width=130, anchor="w")
-                time_lbl.pack(side="left", padx=10, pady=5)
-                
-                name_lbl = ctk.CTkLabel(row_frame, text=t_name, font=("Arial", 14, "bold"), text_color="#ecf0f1")
-                name_lbl.pack(side="left", padx=10, pady=5)
-                
-                alt_lbl = ctk.CTkLabel(row_frame, text=f"(Ø Höhe: {alt}°)", font=("Arial", 12), text_color="#7f8c8d")
-                alt_lbl.pack(side="left", padx=5, pady=5)
-                
-        btn_ai = ctk.CTkButton(self.scroll_tonight, text="🤖 KI-Berater: Tagesplan auswerten (Prompt kopieren)", height=40, font=("Arial", 14, "bold"), fg_color="#8e44ad", hover_color="#9b59b6")
-        btn_ai.configure(command=lambda: self.generate_ai_prompt(w_str, events_today, night_plan))
+        btn_ai = ctk.CTkButton(self.scroll_tonight, text="🤖 KI-Berater: Tagespläne auswerten (Prompt kopieren)", height=40, font=("Arial", 14, "bold"), fg_color="#8e44ad", hover_color="#9b59b6")
+        btn_ai.configure(command=lambda: self.generate_ai_prompt(w_str, events_today, night_plans))
         btn_ai.pack(pady=20, padx=10, fill="x")
 
-    def generate_ai_prompt(self, weather_str, events_today, night_plan):
+    def generate_ai_prompt(self, weather_str, events_today, night_plans):
         cfg = utils.load_config()
         lat = cfg.get("default_lat", "51.16")
         
@@ -931,23 +936,28 @@ class ObsListFrame(ctk.CTkFrame):
             for e in events_today: prompt += f"- {e['title']}: {e['desc']}\n"
             prompt += "\n"
             
-        prompt += "Mein Smart-Teleskop-Plan für heute Nacht (berechnet in 1,5 Stunden Blöcken nach optimaler Sichtbarkeit):\n"
-        if not night_plan: 
+        prompt += "Da ich meinen Standort wählen kann (oder zwei Teleskope gleichzeitig nutze), habe ich hier ZWEI getrennte Pläne berechnet:\n\n"
+        if not night_plans.get("Süd") and not night_plans.get("Nord"): 
             prompt += "- (Plan konnte wegen Wetter/Höhe oder fehlender Ziele nicht erstellt werden)\n"
         else:
-            for block in night_plan:
-                prompt += f"- {block['start'].strftime('%H:%M')} bis {block['end'].strftime('%H:%M')}: {block['target']['name']} (Durchschnittliche Höhe: {int(block['alt'])}°)\n"
+            for hemi in ["Süd", "Nord"]:
+                if night_plans.get(hemi):
+                    prompt += f"--- PLAN FÜR BLICKRICHTUNG {hemi.upper()} ---\n"
+                    for block in night_plans[hemi]:
+                        comp = az_to_compass(block['az'])
+                        prompt += f"- {block['start'].strftime('%H:%M')} bis {block['end'].strftime('%H:%M')}: {block['target']['name']} (Höhe: {int(block['alt'])}°, Richtung: {comp})\n"
+                    prompt += "\n"
                 
-        prompt += "\nBitte beantworte mir folgende Punkte exakt in dieser Reihenfolge:\n"
+        prompt += "Bitte beantworte mir folgende Punkte exakt in dieser Reihenfolge:\n"
         prompt += "1. Lohnt sich Astrofotografie heute bei diesem Wetter und der Mondphase?\n"
-        prompt += "2. Schau dir meinen Teleskop-Plan an: Ist die Reihenfolge sinnvoll gewählt, oder würdest du (wegen Lichtverschmutzung, Mond oder Objekttyp) etwas tauschen?\n"
-        prompt += "3. Aktuelles: Bitte nenne mir (nutze unbedingt deine Web-Suche) einen Kometen ODER eine frische Supernova, die ich in meinen Plan integrieren könnte.\n"
-        prompt += f"4. Dein 'Tipp des Tages': Ein Objekt, das heute gut passt und noch NICHT in meinem Plan steht. Lege den Fokus heute explizit auf: {daily_focus}.\n"
+        prompt += "2. Schau dir meine beiden Pläne (Nord und Süd) an: Sind die Reihenfolgen sinnvoll gewählt, oder würdest du (wegen Lichtverschmutzung, Mond oder Objekttyp) etwas tauschen?\n"
+        prompt += "3. Aktuelles: Bitte nenne mir (nutze unbedingt deine Web-Suche) einen Kometen ODER eine frische Supernova, die ich in einen der Pläne integrieren könnte.\n"
+        prompt += f"4. Dein 'Tipp des Tages': Ein Objekt, das heute gut passt und noch NICHT in meinen Plänen steht. Lege den Fokus heute explizit auf: {daily_focus}.\n"
         
         self.winfo_toplevel().clipboard_clear()
         self.winfo_toplevel().clipboard_append(prompt)
         
-        msg = "Der Prompt mit dem Teleskop-Plan wurde in die Zwischenablage kopiert!\n\nMöchtest du ChatGPT jetzt im Browser öffnen?"
+        msg = "Der Prompt mit beiden Teleskop-Plänen wurde kopiert!\n\nMöchtest du ChatGPT jetzt im Browser öffnen?"
         if messagebox.askyesno("KI-Prompt kopiert!", msg):
             import webbrowser
             webbrowser.open("https://chatgpt.com/")
@@ -1206,8 +1216,7 @@ class ObsListFrame(ctk.CTkFrame):
         targets = load_aae_targets_rich()
         if targets is None: targets = []
         
-        # --- NEU: Wir generieren den Teleskop-Plan für die Handy-App ---
-        night_plan = self.generate_night_plan(targets)
+        night_plans = self.generate_night_plan(targets)
         
         cfg = utils.load_config()
         export_dir = cfg.get("export_path", "")
@@ -1229,11 +1238,6 @@ class ObsListFrame(ctk.CTkFrame):
         lat = float(cfg.get("default_lat", 51.16))
         lon = float(cfg.get("default_lon", 10.45))
         loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg)
-
-        def az_to_compass(az):
-            dirs = ["N", "NNO", "NO", "ONO", "O", "OSO", "SO", "SSO", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
-            idx = int((az + 11.25) / 22.5) % 16
-            return dirs[idx]
 
         def get_best_time(ra_deg, dec_deg):
             max_alt = 90 - abs(lat - dec_deg)
@@ -1283,22 +1287,27 @@ class ObsListFrame(ctk.CTkFrame):
 
         # --- HTML FÜR DEN PLAN GENERIEREN ---
         plan_html = ""
-        if not night_plan:
+        if not night_plans.get("Süd") and not night_plans.get("Nord"):
             plan_html = "<p style='text-align:center; color:#888; margin-top:30px;'>Kein Teleskop-Plan möglich<br><br>(Keine Dunkelheit, Liste leer oder keine Objekte hoch genug)</p>"
         else:
-            for block in night_plan:
-                s_str = block['start'].strftime('%H:%M')
-                e_str = block['end'].strftime('%H:%M')
-                t_name = block['target']['name']
-                alt = int(block['alt'])
-                
-                plan_html += f"""
-                <div class="plan-card">
-                    <p class="plan-time">🕒 {s_str} - {e_str}</p>
-                    <p class="plan-target">{t_name}</p>
-                    <p class="plan-alt">Ø Höhe: {alt}°</p>
-                </div>
-                """
+            for hemi in ["Süd", "Nord"]:
+                plan_list = night_plans.get(hemi, [])
+                if plan_list:
+                    plan_html += f"<h3 style='color:#3498db; margin-top:15px; margin-bottom:5px; font-size:16px;'>Blickrichtung: {hemi}</h3>"
+                    for block in plan_list:
+                        s_str = block['start'].strftime('%H:%M')
+                        e_str = block['end'].strftime('%H:%M')
+                        t_name = block['target']['name']
+                        alt = int(block['alt'])
+                        comp = az_to_compass(block['az'])
+                        
+                        plan_html += f"""
+                        <div class="plan-card">
+                            <p class="plan-time">🕒 {s_str} - {e_str}</p>
+                            <p class="plan-target">{t_name}</p>
+                            <p class="plan-alt">Ø Höhe: {alt}° | Richtung: {comp}</p>
+                        </div>
+                        """
 
         target_cards_html = ""
         scripts_js = ""

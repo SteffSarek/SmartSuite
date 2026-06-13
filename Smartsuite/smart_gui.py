@@ -1,5 +1,5 @@
 # ==============================================================================
-# SMART_GUI.PY - Benutzeroberfläche (V1.0)
+# SMART_GUI.PY - Benutzeroberfläche
 # ==============================================================================
 import tkinter as tk
 import tkinter.font as tkfont

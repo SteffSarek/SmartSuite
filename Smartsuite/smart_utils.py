@@ -1,5 +1,5 @@
 # ==============================================================================
-# SMART_UTILS.PY - Logik und Hilfsfunktionen (V1.0.0)
+# SMART_UTILS.PY - Logik und Hilfsfunktionen
 # ==============================================================================
 import os
 import json

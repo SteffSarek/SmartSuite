@@ -1,11 +1,11 @@
 # ==============================================================================
-# SMART_MAIN.PY - Startpunkt (V1.0.0: GitHub Release)
+# SMART_MAIN.PY - Startpunkt
 # ==============================================================================
 import smart_gui
 import sys
 
-# Version 1.0.0 Release
-CURRENT_VERSION = "1.0"
+# Wir laden die Version zentral aus der version.py
+import version
 
 if __name__ == "__main__":
     start_mode = None
@@ -17,5 +17,6 @@ if __name__ == "__main__":
             start_mode = "analyze"
             start_path = sys.argv[2]
 
-    app = smart_gui.SmartSuiteApp(version_string=CURRENT_VERSION, start_mode=start_mode, start_path=start_path)
+    # Übergebe die Version an die GUI
+    app = smart_gui.SmartSuiteApp(version_string=version.CURRENT_VERSION, start_mode=start_mode, start_path=start_path)
     app.mainloop()

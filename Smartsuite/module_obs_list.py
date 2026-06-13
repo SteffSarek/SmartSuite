@@ -87,19 +87,28 @@ def remove_event(event_id, fallback_title=None, fallback_date=None):
     save_list(new_data)
 # --------------------------------------------------------------
 
-def load_aae_targets_rich():
+# --- NEU: ZENTRALE PFAD-VERWALTUNG ---
+def get_list_paths():
     cfg = utils.load_config()
+    target_dir = cfg.get("custom_tools_path", "")
     
-    # Da jetzt alles gebündelt ist, liegen die Dateien direkt nebenan
-    notes_path = "user_notes.json"
-    cache_path = "coordinate_cache.json"
-    cat_path = "catalogs.json"
+    notes_path = os.path.join(target_dir, "user_notes.json") if target_dir else "user_notes.json"
+    cache_path = os.path.join(target_dir, "coordinate_cache.json") if target_dir else "coordinate_cache.json"
+    cat_path = os.path.join(target_dir, "catalogs.json") if target_dir else "catalogs.json"
     
+    return notes_path, cache_path, cat_path
+
+def load_aae_targets_rich():
+    notes_path, cache_path, cat_path = get_list_paths()
+    
+    # NEU: Wenn die Datei gar nicht existiert, brechen wir ab und geben None zurück!
+    if not os.path.exists(notes_path):
+        return None
+        
     notes = {}
-    if os.path.exists(notes_path):
-        try:
-            with open(notes_path, "r", encoding="utf-8") as f: notes = json.load(f)
-        except: pass
+    try:
+        with open(notes_path, "r", encoding="utf-8") as f: notes = json.load(f)
+    except: pass
         
     if not notes: return []
     
@@ -171,7 +180,6 @@ def load_aae_targets_rich():
             ra = None; dec = None
             hash_key = f"id_{base_id}"
 
-        # --- NEU: Eigener Display-Name hat Vorrang ---
         if note_data.get("display_name"):
             display_name = note_data["display_name"]
         else:
@@ -182,7 +190,6 @@ def load_aae_targets_rich():
             elif base_id.startswith("c"): display_name = f"C {base_id[1:]}"
             if key.upper() not in display_name and not display_name.startswith(key.upper()):
                 display_name += f" ({key.upper()})"
-        # ---------------------------------------------
 
         if hash_key in unique_targets:
             existing_name = unique_targets[hash_key]["name"]
@@ -204,6 +211,7 @@ def load_aae_targets_rich():
             with open(cache_path, "w", encoding="utf-8") as f: json.dump(cache, f, indent=4)
         except: pass
 
+    cfg = utils.load_config()
     lat = float(cfg.get("default_lat", 51.16))
     lon = float(cfg.get("default_lon", 10.45))
     loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg)
@@ -503,9 +511,7 @@ class ObsListFrame(ctk.CTkFrame):
         coords_str = self._temp_search_result["coords_str"]
         note = self.target_note_entry.get().strip()
         
-        # Liegt jetzt alles im Stammverzeichnis
-        notes_path = "user_notes.json"
-        cache_path = "coordinate_cache.json"
+        notes_path, cache_path, _ = get_list_paths()
 
         cache = {}
         if os.path.exists(cache_path):
@@ -545,7 +551,7 @@ class ObsListFrame(ctk.CTkFrame):
         self._on_name_change(); self.refresh_ui()
 
     def remove_target(self, target_key):
-        notes_path = "user_notes.json"
+        notes_path, cache_path, _ = get_list_paths()
             
         if os.path.exists(notes_path):
             try:
@@ -586,7 +592,7 @@ class ObsListFrame(ctk.CTkFrame):
             
             # Nur speichern, wenn sich wirklich was geändert hat und es nicht leer ist
             if new_name and new_name != current_name:
-                notes_path = "user_notes.json"
+                notes_path, cache_path, _ = get_list_paths()
                 
                 if os.path.exists(notes_path):
                     try:
@@ -743,6 +749,105 @@ class ObsListFrame(ctk.CTkFrame):
         hint_radar.pack(side="left")
         hint_radar.bind("<Button-1>", self.open_cloud_radar)
 
+    def generate_night_plan(self, targets):
+        """Erstellt einen sequenziellen Zeitplan für die heutige Nacht."""
+        cfg = utils.load_config()
+        lat = float(cfg.get("default_lat", 51.16))
+        lon = float(cfg.get("default_lon", 10.45))
+        loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg)
+        local_tz = pytz.timezone('Europe/Berlin')
+
+        # FIX: Zeitzone explizit setzen, sonst rechnet Astropy mit falschem UTC-Offset!
+        now = datetime.now(local_tz)
+        
+        # Planung startet "jetzt" (wenn es Nacht ist) oder zum nächsten Abend
+        if now.hour >= 17 or now.hour < 6:
+            start_dt = now
+        else:
+            start_dt = now.replace(hour=18, minute=0, second=0, microsecond=0)
+
+        # Berechne den Sonnenstand für die nächsten 15 Stunden (in 15-Minuten-Schritten)
+        times_local = [start_dt + timedelta(minutes=15*i) for i in range(60)]
+        astro_times = Time(times_local) # Astropy konvertiert das jetzt korrekt!
+        sun_altaz = get_sun(astro_times).transform_to(AltAz(obstime=astro_times, location=loc))
+
+        # Bürgerliche Dämmerung (-6°)
+        dark_indices = [i for i, alt in enumerate(sun_altaz.alt.deg) if alt < -6]
+
+        if not dark_indices: return [] # Wenn die Sonne nachts nicht unter -6° sinkt
+
+        first_dark = times_local[dark_indices[0]]
+        last_dark = times_local[dark_indices[-1]]
+
+        # Der Plan startet frühestens, wenn es dunkel ist, oder "jetzt"
+        plan_start = max(first_dark, now)
+        # Auf die nächste volle 15-Minuten-Grenze aufrunden
+        mins = 15 * math.ceil(plan_start.minute / 15)
+        plan_start = plan_start.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=mins)
+
+        # Falls der Start bereits nach der Dämmerung am Morgen liegt
+        if plan_start >= last_dark: return []
+
+        valid_targets = [t for t in targets if t.get('ra') is not None]
+        plan = []
+        current_time = plan_start
+
+        scheduled_counts = {t['name']: 0 for t in valid_targets}
+
+        # Fülle die Zeitslots exakt bis zum Morgengrauen (last_dark)
+        while current_time < last_dark:
+            # Wie viel Zeit bleibt noch bis zum Hellwerden?
+            time_left = last_dark - current_time
+            
+            # Wenn weniger als 20 Minuten Restzeit sind, lohnt sich kein Schwenk mehr
+            if time_left < timedelta(minutes=20): 
+                break 
+
+            # Am Ende der Nacht wird der Block passend gekürzt! Sonst immer max 1.5h
+            actual_duration = min(timedelta(hours=1, minutes=30), time_left)
+            
+            # Wir prüfen die Höhe zur echten Mitte der Session
+            mid_time = current_time + (actual_duration / 2)
+            mid_astro = Time(mid_time)
+
+            best_target = None
+            best_score = -9999
+
+            for t in valid_targets:
+                coord = SkyCoord(ra=t['ra']*u.deg, dec=t['dec']*u.deg)
+                alt = coord.transform_to(AltAz(obstime=mid_astro, location=loc)).alt.deg
+
+                if alt > 5: # Absolutes Minimum für südliche Objekte
+                    current_score = t.get('score', 0)
+                    
+                    # Höhen-Bonus
+                    if alt >= 20:
+                        current_score += (alt * 2) 
+                    else:
+                        current_score -= ((20 - alt) * 5) 
+
+                    # Strafe für bereits geplante Objekte
+                    current_score -= (scheduled_counts[t['name']] * 150)
+
+                    if current_score > best_score:
+                        best_score = current_score
+                        best_target = t
+                        best_target['_temp_alt'] = alt
+
+            if best_target:
+                plan.append({
+                    "start": current_time,
+                    "end": current_time + actual_duration,
+                    "target": best_target,
+                    "alt": best_target['_temp_alt']
+                })
+                scheduled_counts[best_target['name']] += 1
+                current_time += actual_duration
+            else:
+                current_time += timedelta(minutes=30)
+
+        return plan
+    
     def render_tonight_tab(self):
         for widget in self.scroll_tonight.winfo_children(): widget.destroy()
         
@@ -765,43 +870,59 @@ class ObsListFrame(ctk.CTkFrame):
             for e in events_today:
                 ctk.CTkLabel(e_frame, text=f"{e.get('icon','')} {e['title']} - {e['time']}\n{e['desc']}", justify="left").pack(anchor="w", padx=10, pady=(5,10))
                 
-        top_targets = []
+        # --- NEU: DER SEQUENZIELLE SMART-TELESKOP PLAN ---
+        night_plan = []
         if self.last_targets:
-            top_targets = [t for t in self.last_targets if t.get("score", 0) > 20][:5]
+            night_plan = self.generate_night_plan(self.last_targets)
             
         t_frame = ctk.CTkFrame(self.scroll_tonight, fg_color="#1a1a1a", border_width=1, border_color="#2ecc71", corner_radius=8)
         t_frame.pack(fill="x", padx=10, pady=10)
-        ctk.CTkLabel(t_frame, text="Deine Top Ziele für Heute Nacht", font=("Arial", 14, "bold"), text_color="#2ecc71").pack(anchor="w", padx=10, pady=(10,0))
+        ctk.CTkLabel(t_frame, text="Teleskop-Plan für Heute Nacht (je 1,5 Std)", font=("Arial", 14, "bold"), text_color="#2ecc71").pack(anchor="w", padx=10, pady=(10,0))
         
-        if not top_targets:
-            ctk.CTkLabel(t_frame, text="Keine gut sichtbaren Ziele auf deiner Liste oder Wetter zu schlecht.", text_color="gray").pack(anchor="w", padx=10, pady=(5,10))
+        if not night_plan:
+            ctk.CTkLabel(t_frame, text="Keine gut sichtbaren Ziele auf deiner Liste oder Wetter zu schlecht/zu hell.", text_color="gray").pack(anchor="w", padx=10, pady=(5,10))
         else:
-            for i, t in enumerate(top_targets):
-                score_col = "#2ecc71" if t["score"] > 75 else "#f39c12" if t["score"] > 40 else "#e74c3c"
-                txt = f"{i+1}. {t['name']}  |  Score: {t['score']}  |  Höchster Punkt: {t['transit_time']} Uhr ({int(t['max_alt'])}°)"
-                ctk.CTkLabel(t_frame, text=txt, text_color=score_col, font=("Arial", 13, "bold")).pack(anchor="w", padx=10, pady=(5,5))
+            for idx, block in enumerate(night_plan):
+                s_str = block['start'].strftime('%H:%M')
+                e_str = block['end'].strftime('%H:%M')
+                t_name = block['target']['name']
+                alt = int(block['alt'])
                 
-        btn_ai = ctk.CTkButton(self.scroll_tonight, text="🤖 KI-Berater: 'Tipp des Tages' generieren (Prompt kopieren)", height=40, font=("Arial", 14, "bold"), fg_color="#8e44ad", hover_color="#9b59b6")
-        btn_ai.configure(command=lambda: self.generate_ai_prompt(w_str, events_today, top_targets))
+                # Farb-Logik für die Blöcke
+                bg_color = "#242424" if idx % 2 == 0 else "#2a2a2a"
+                
+                row_frame = ctk.CTkFrame(t_frame, fg_color=bg_color, corner_radius=4)
+                row_frame.pack(fill="x", padx=10, pady=4)
+                
+                time_lbl = ctk.CTkLabel(row_frame, text=f"🕒 {s_str} - {e_str}", font=("Consolas", 13, "bold"), text_color="#f39c12", width=130, anchor="w")
+                time_lbl.pack(side="left", padx=10, pady=5)
+                
+                name_lbl = ctk.CTkLabel(row_frame, text=t_name, font=("Arial", 14, "bold"), text_color="#ecf0f1")
+                name_lbl.pack(side="left", padx=10, pady=5)
+                
+                alt_lbl = ctk.CTkLabel(row_frame, text=f"(Ø Höhe: {alt}°)", font=("Arial", 12), text_color="#7f8c8d")
+                alt_lbl.pack(side="left", padx=5, pady=5)
+                
+        btn_ai = ctk.CTkButton(self.scroll_tonight, text="🤖 KI-Berater: Tagesplan auswerten (Prompt kopieren)", height=40, font=("Arial", 14, "bold"), fg_color="#8e44ad", hover_color="#9b59b6")
+        btn_ai.configure(command=lambda: self.generate_ai_prompt(w_str, events_today, night_plan))
         btn_ai.pack(pady=20, padx=10, fill="x")
 
-    def generate_ai_prompt(self, weather_str, events_today, top_targets):
+    def generate_ai_prompt(self, weather_str, events_today, night_plan):
         cfg = utils.load_config()
         lat = cfg.get("default_lat", "51.16")
         
         day_of_year = datetime.now().timetuple().tm_yday
         focus_categories = [
-            "einen spannenden veränderlichen Stern (z.B. Bedeckungsveränderliche, Algol-Typ etc., bei denen sich eine Beobachtungsreihe lohnt)",
+            "einen spannenden veränderlichen Stern (z.B. Bedeckungsveränderliche, Algol-Typ etc.)",
             "einen aktuell sichtbaren Kometen oder interessanten Kleinplaneten",
-            "einen fotografisch reizvollen, aber eher unbekannten Nebel (z.B. Planetarischer Nebel oder Dunkelnebel)",
-            "eine besondere Galaxie (z.B. Edge-On, interagierendes Paar oder eine mit aktuellem Supernova-Verdacht)",
-            "einen dichten Kugelsternhaufen oder schönen offenen Sternhaufen",
-            "ein 'Spezial-Objekt' (z.B. leuchtend roter Kohlenstoffstern, Quasar oder auffälliger Doppelstern)"
+            "einen fotografisch reizvollen Planetarischen Nebel oder Dunkelnebel",
+            "eine besondere Galaxie (z.B. Edge-On, interagierendes Paar)",
+            "einen dichten Kugelsternhaufen oder offenen Sternhaufen"
         ]
         daily_focus = focus_categories[day_of_year % len(focus_categories)]
         
         prompt = "Du bist ein erfahrener Astronom und Astrofotograf.\n"
-        prompt += "Meine Ausrüstung besteht aus folgenden Smart-Teleskopen: Seestar S30 Pro, Seestar S50 und Dwarf 3. Berücksichtige deren jeweilige Gesichtsfelder und Fähigkeiten.\n\n"
+        prompt += "Meine Ausrüstung besteht aus folgenden Smart-Teleskopen: Seestar S30 Pro, Seestar S50 und Dwarf 3. Sie haben in der App einen Planungs-Modus.\n\n"
         prompt += f"Heute ist der {datetime.now().strftime('%d.%m.%Y')}. Mein Standort liegt auf dem Breitengrad {lat}° (Nordhalbkugel).\n"
         prompt += f"Die Wetter- und Mondbedingungen für heute Nacht lauten: {weather_str}\n\n"
         
@@ -810,37 +931,64 @@ class ObsListFrame(ctk.CTkFrame):
             for e in events_today: prompt += f"- {e['title']}: {e['desc']}\n"
             prompt += "\n"
             
-        prompt += "Auf meiner Beobachtungsliste stehen heute ganz oben (sortiert nach aktueller Sichtbarkeit):\n"
-        if not top_targets: 
-            prompt += "- (Liste ist aktuell leer)\n"
+        prompt += "Mein Smart-Teleskop-Plan für heute Nacht (berechnet in 1,5 Stunden Blöcken nach optimaler Sichtbarkeit):\n"
+        if not night_plan: 
+            prompt += "- (Plan konnte wegen Wetter/Höhe oder fehlender Ziele nicht erstellt werden)\n"
         else:
-            for i, t in enumerate(top_targets): 
-                prompt += f"{i+1}. {t['name']} (Höchster Punkt: {t['max_alt']}° um {t['transit_time']} Uhr)\n"
+            for block in night_plan:
+                prompt += f"- {block['start'].strftime('%H:%M')} bis {block['end'].strftime('%H:%M')}: {block['target']['name']} (Durchschnittliche Höhe: {int(block['alt'])}°)\n"
                 
-        prompt += "\nBitte beantworte mir folgende 5 Punkte exakt in dieser Reihenfolge:\n"
+        prompt += "\nBitte beantworte mir folgende Punkte exakt in dieser Reihenfolge:\n"
         prompt += "1. Lohnt sich Astrofotografie heute bei diesem Wetter und der Mondphase?\n"
-        prompt += "2. Welches Ziel meiner Liste empfiehlst du heute am ehesten für meine Smart-Teleskope?\n"
-        prompt += "3. Veränderliche Sterne: Nenne mir einen lohnenswerten, heute gut sichtbaren veränderlichen Stern (z.B. Algol-Typ, Mira-Stern) für eine Messreihe.\n"
-        prompt += "4. Aktuelles: Bitte nenne mir (nutze unbedingt deine Web-Suche, falls verfügbar) einen aktuell sichtbaren Kometen ODER eine frische Supernova, die von meinem Standort aus machbar ist.\n"
-        prompt += f"5. Dein 'Tipp des Tages': Ein Objekt, das heute sehr hoch steht, zur Mondphase passt und noch NICHT auf meiner Liste ist. Lege den Fokus heute explizit auf: {daily_focus}.\n"
+        prompt += "2. Schau dir meinen Teleskop-Plan an: Ist die Reihenfolge sinnvoll gewählt, oder würdest du (wegen Lichtverschmutzung, Mond oder Objekttyp) etwas tauschen?\n"
+        prompt += "3. Aktuelles: Bitte nenne mir (nutze unbedingt deine Web-Suche) einen Kometen ODER eine frische Supernova, die ich in meinen Plan integrieren könnte.\n"
+        prompt += f"4. Dein 'Tipp des Tages': Ein Objekt, das heute gut passt und noch NICHT in meinem Plan steht. Lege den Fokus heute explizit auf: {daily_focus}.\n"
         
-        # Text in die Zwischenablage kopieren
         self.winfo_toplevel().clipboard_clear()
         self.winfo_toplevel().clipboard_append(prompt)
         
-        # Abfrage an den Nutzer
-        msg = "Der Prompt wurde in die Zwischenablage kopiert!\n\n(Ausrüstung, Ziele und Wetterdaten sind enthalten).\n\nMöchtest du ChatGPT jetzt im Browser öffnen?"
+        msg = "Der Prompt mit dem Teleskop-Plan wurde in die Zwischenablage kopiert!\n\nMöchtest du ChatGPT jetzt im Browser öffnen?"
         if messagebox.askyesno("KI-Prompt kopiert!", msg):
-            # Öffnet ChatGPT direkt im Standard-Browser
+            import webbrowser
             webbrowser.open("https://chatgpt.com/")
-            # Optional: Oder Claude, je nach Präferenz
-            # webbrowser.open("https://claude.ai/new")
 
     # --- DIE FIXIERTE LÖSCHFUNKTION & GUI UPDATE ---
     def delete_event(self, event_id, fallback_title=None, fallback_date=None):
         remove_event(event_id, fallback_title, fallback_date)
         self.refresh_ui()
 
+    def _handle_missing_target_list(self):
+        """Fragt den Nutzer, was passieren soll, wenn die Liste fehlt."""
+        msg = ("Es wurde keine Beobachtungsliste (user_notes.json) gefunden.\n\n"
+               "Hast du den AstroArchive Explorer? Klicke auf 'Ja', um den Ordner auszuwählen.\n"
+               "Möchtest du eine völlig neue, leere Liste anlegen? Klicke auf 'Nein'.")
+               
+        # Ja = Suchen, Nein = Neu erstellen, Abbrechen = Ignorieren
+        reply = messagebox.askyesnocancel("Beobachtungsliste fehlt", msg)
+        
+        cfg = utils.load_config()
+        
+        if reply is True: # Suchen
+            d = filedialog.askdirectory(title="Ordner mit user_notes.json auswählen")
+            if d:
+                cfg["custom_tools_path"] = os.path.normpath(d)
+                utils.save_config("custom_tools_path", cfg["custom_tools_path"])
+                
+        elif reply is False: # Neu erstellen
+            # Wir legen die Dateien sauber im AstroData Ordner ab
+            new_dir = utils.get_data_dir()
+            cfg["custom_tools_path"] = new_dir
+            utils.save_config("custom_tools_path", new_dir)
+            
+            try:
+                with open(os.path.join(new_dir, "user_notes.json"), "w", encoding="utf-8") as f: 
+                    json.dump({}, f)
+                with open(os.path.join(new_dir, "coordinate_cache.json"), "w", encoding="utf-8") as f: 
+                    json.dump({}, f)
+                messagebox.showinfo("Erfolg", "Leere Beobachtungsliste wurde erfolgreich angelegt!")
+            except Exception as e:
+                messagebox.showerror("Fehler", f"Konnte Dateien nicht anlegen: {e}")
+    
     def refresh_ui(self):
         for widget in self.scroll_events.winfo_children(): widget.destroy()
         self.last_events = load_list()
@@ -874,12 +1022,20 @@ class ObsListFrame(ctk.CTkFrame):
         
         self.last_targets = load_aae_targets_rich()
         
+        # NEU: Falls die Datei fehlt, starten wir den Abfrage-Dialog
+        if self.last_targets is None:
+            lbl_loading.configure(text="Warte auf Benutzereingabe...")
+            self._handle_missing_target_list()
+            # Nach dem Dialog versuchen wir es einfach nochmal
+            self.last_targets = load_aae_targets_rich()
+            
         lbl_loading.destroy()
         
         local_tz = pytz.timezone('Europe/Berlin')
         
         if self.last_targets is None:
-            ctk.CTkLabel(self.scroll_targets, text="AstroArchive nicht gefunden.\n\nPfad in den Einstellungen prüfen.", text_color="#e74c3c").pack(pady=50)
+            # Falls der Nutzer im Dialog auf "Abbrechen" geklickt hat
+            ctk.CTkLabel(self.scroll_targets, text="Beobachtungsliste nicht konfiguriert.\n\nStarte das Programm neu oder setze den Pfad in den Einstellungen.", text_color="#e74c3c").pack(pady=50)
         elif len(self.last_targets) == 0:
             ctk.CTkLabel(self.scroll_targets, text="Beobachtungsliste leer.", text_color="gray").pack(pady=50)
         else:
@@ -1050,6 +1206,9 @@ class ObsListFrame(ctk.CTkFrame):
         targets = load_aae_targets_rich()
         if targets is None: targets = []
         
+        # --- NEU: Wir generieren den Teleskop-Plan für die Handy-App ---
+        night_plan = self.generate_night_plan(targets)
+        
         cfg = utils.load_config()
         export_dir = cfg.get("export_path", "")
         
@@ -1121,6 +1280,25 @@ class ObsListFrame(ctk.CTkFrame):
             
         astro_times = Time(times)
         frame = AltAz(obstime=astro_times, location=loc)
+
+        # --- HTML FÜR DEN PLAN GENERIEREN ---
+        plan_html = ""
+        if not night_plan:
+            plan_html = "<p style='text-align:center; color:#888; margin-top:30px;'>Kein Teleskop-Plan möglich<br><br>(Keine Dunkelheit, Liste leer oder keine Objekte hoch genug)</p>"
+        else:
+            for block in night_plan:
+                s_str = block['start'].strftime('%H:%M')
+                e_str = block['end'].strftime('%H:%M')
+                t_name = block['target']['name']
+                alt = int(block['alt'])
+                
+                plan_html += f"""
+                <div class="plan-card">
+                    <p class="plan-time">🕒 {s_str} - {e_str}</p>
+                    <p class="plan-target">{t_name}</p>
+                    <p class="plan-alt">Ø Höhe: {alt}°</p>
+                </div>
+                """
 
         target_cards_html = ""
         scripts_js = ""
@@ -1213,11 +1391,17 @@ class ObsListFrame(ctk.CTkFrame):
         
         /* Bottom Navigation */
         .bottom-nav {{ position: fixed; bottom: 0; left: 0; width: 100%; background: #1e1e1e; display: flex; border-top: 1px solid #333; z-index: 100; padding-bottom: env(safe-area-inset-bottom); }}
-        .nav-btn {{ flex: 1; padding: 15px; text-align: center; color: #888; text-decoration: none; font-size: 14px; font-weight: bold; background: none; border: none; outline: none; }}
-        .nav-btn.active {{ color: #3498db; border-top: 2px solid #3498db; }}
+        .nav-btn {{ flex: 1; padding: 10px 5px; text-align: center; color: #888; text-decoration: none; font-size: 13px; font-weight: bold; background: none; border: none; outline: none; }}
+        .nav-btn.active {{ color: #3498db; border-top: 2px solid #3498db; background-color: rgba(52, 152, 219, 0.1); }}
         
         .tab-content {{ display: none; }}
         .tab-content.active {{ display: block; }}
+        
+        /* Plan Styling */
+        .plan-card {{ background-color: #1e1e1e; border-left: 4px solid #2ecc71; padding: 15px; margin-bottom: 12px; border-radius: 8px; border-top: 1px solid #333; border-right: 1px solid #333; border-bottom: 1px solid #333; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }}
+        .plan-time {{ color: #f39c12; font-family: Consolas, monospace; font-weight: bold; font-size: 15px; margin: 0 0 8px 0; }}
+        .plan-target {{ color: #ecf0f1; font-weight: bold; font-size: 17px; margin: 0 0 5px 0; line-height: 1.3; }}
+        .plan-alt {{ color: #7f8c8d; font-size: 13px; margin: 0; }}
         
         /* Event Styling */
         .event-card {{ background-color: #1e1e1e; border-radius: 16px; padding: 15px; margin-bottom: 15px; border: 1px solid #333; display: flex; align-items: center; }}
@@ -1248,8 +1432,14 @@ class ObsListFrame(ctk.CTkFrame):
         <div class="sync-time">Letzter Sync: {now_str} Uhr</div>
     </div>
 
-    <!-- TAB 1: ZIELE -->
-    <div id="tab-targets" class="tab-content active">
+    <!-- TAB 1: HEUTE NACHT (PLAN) -->
+    <div id="tab-plan" class="tab-content active">
+        <h2 style="font-size: 18px; color: #2ecc71; margin-bottom: 15px; border-bottom: 1px solid #333; padding-bottom: 10px;">Teleskop-Plan (je 1,5 Std)</h2>
+        {plan_html}
+    </div>
+
+    <!-- TAB 2: ZIELE -->
+    <div id="tab-targets" class="tab-content">
 """
         if chart_id == 0:
             html += "<p style='text-align:center; color:#888;'>Beobachtungsliste ist leer oder enthält keine Koordinaten.</p>"
@@ -1259,7 +1449,7 @@ class ObsListFrame(ctk.CTkFrame):
         html += """
     </div>
 
-    <!-- TAB 2: KALENDER -->
+    <!-- TAB 3: KALENDER -->
     <div id="tab-events" class="tab-content">
 """
         if not events:
@@ -1281,8 +1471,9 @@ class ObsListFrame(ctk.CTkFrame):
 
     <!-- BOTTOM NAV -->
     <div class="bottom-nav">
-        <button class="nav-btn active" onclick="switchTab('targets', this)">🔭 Meine Ziele</button>
-        <button class="nav-btn" onclick="switchTab('events', this)">📅 Kalender</button>
+        <button class="nav-btn active" onclick="switchTab('plan', this)">✨ Heute</button>
+        <button class="nav-btn" onclick="switchTab('targets', this)">🔭 Ziele</button>
+        <button class="nav-btn" onclick="switchTab('events', this)">📅 Termine</button>
     </div>
 
     <script>
@@ -1304,21 +1495,17 @@ class ObsListFrame(ctk.CTkFrame):
             with open(html_file, "w", encoding="utf-8") as f:
                 f.write(html)
             
-            # Ein Fenster bauen, das sich von selbst schließt (damit beim Beenden der App kein Klick nötig ist)
             success_win = ctk.CTkToplevel(self)
             success_win.title("Sync erfolgreich")
             success_win.geometry("350x120")
             success_win.attributes("-topmost", True)
             
-            # Mittig zentrieren
             success_win.update_idletasks()
             x = self.winfo_rootx() + (self.winfo_width() // 2) - 175
             y = self.winfo_rooty() + (self.winfo_height() // 2) - 60
             success_win.geometry(f"+{x}+{y}")
             
             ctk.CTkLabel(success_win, text="✅ Handy-App erfolgreich aktualisiert!", font=("Arial", 14, "bold"), text_color="#2ecc71").pack(expand=True)
-            
-            # Fenster zerstört sich nach 1.5 Sekunden von selbst
             success_win.after(1500, success_win.destroy)
             
         except Exception as e:

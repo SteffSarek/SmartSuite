@@ -359,7 +359,56 @@ class AstroCalendarFrame(ctk.CTkFrame):
                             if iss_culm_alt > 35:
                                 dt_rise = dt_start.replace(tzinfo=pytz.utc).astimezone(local_tz)
                                 dt_culm = t_culm.utc_datetime().replace(tzinfo=pytz.utc).astimezone(local_tz)
-                                events.append({"time": dt_culm, "icon": "🛰️", "title": "Heller ISS Überflug", "desc": f"Sichtbar ab {dt_rise.strftime('%H:%M')} Uhr. Höchster Punkt: {int(iss_culm_alt)}° um {dt_culm.strftime('%H:%M')} Uhr."})
+                                dt_set = t_end.utc_datetime().replace(tzinfo=pytz.utc).astimezone(local_tz)
+                                
+                                # Himmelsrichtungen berechnen
+                                def get_dir(time_obj):
+                                    az = (iss - topos).at(time_obj).altaz()[1].degrees
+                                    dirs = ["N", "NNO", "NO", "ONO", "O", "OSO", "SO", "SSO", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+                                    return dirs[int((az + 11.25) / 22.5) % 16]
+                                    
+                                dir_rise = get_dir(t_start)
+                                dir_culm = get_dir(t_culm)
+                                dir_set = get_dir(t_end)
+                                
+                                # --- NEU: Sternbild am höchsten Punkt berechnen ---
+                                # Dafür brauchen wir ein klassisches ephem Objekt
+                                import ephem
+                                obs_ephem = ephem.Observer()
+                                cfg = utils.load_config()
+                                obs_ephem.lat = str(cfg.get("default_lat", "51.16"))
+                                obs_ephem.lon = str(cfg.get("default_lon", "10.45"))
+                                obs_ephem.date = t_culm.utc_datetime()
+                                
+                                # Wir nutzen die RA/DEC der ISS zum Kulminationszeitpunkt
+                                iss_topo = (iss - topos).at(t_culm)
+                                ra_iss, dec_iss, _ = iss_topo.radec()
+                                
+                                # Einen Dummy-Stern an diese Position setzen
+                                dummy = ephem.FixedBody()
+                                dummy._ra = ra_iss.radians
+                                dummy._dec = dec_iss.radians
+                                dummy.compute(obs_ephem)
+                                
+                                const_abbr = ephem.constellation(dummy)[0]
+                                const_map = {
+                                    'Ari': 'Widder', 'Tau': 'Stier', 'Gem': 'Zwillinge', 'Cnc': 'Krebs',
+                                    'Leo': 'Löwe', 'Vir': 'Jungfrau', 'Lib': 'Waage', 'Sco': 'Skorpion',
+                                    'Sgr': 'Schütze', 'Cap': 'Steinbock', 'Aqr': 'Wassermann', 'Psc': 'Fische',
+                                    'Oph': 'Schlangenträger', 'Cet': 'Walfisch', 'Ori': 'Orion', 'Aur': 'Fuhrmann',
+                                    'Sex': 'Sextant', 'UMa': 'Großer Bär', 'Peg': 'Pegasus', 'Cyg': 'Schwan',
+                                    'Cas': 'Kassiopeia', 'Cep': 'Kepheus', 'Boo': 'Bärenhüter', 'Her': 'Herkules',
+                                    'Lyr': 'Leier', 'Aql': 'Adler', 'CrB': 'Nördliche Krone', 'Dra': 'Drache',
+                                    'CVn': 'Nördliche Krone', 'Cam': 'Giraffe', 'And': 'Andromeda', 'Per': 'Perseus'
+                                }
+                                const_de = const_map.get(const_abbr, const_abbr)
+                                
+                                desc_text = (f"Die ISS zieht sichtbar als sehr heller Punkt über den Himmel!\n"
+                                             f"• Auftauchen: {dt_rise.strftime('%H:%M')} Uhr im {dir_rise}\n"
+                                             f"• Höchster Punkt: {dt_culm.strftime('%H:%M')} Uhr ({int(iss_culm_alt)}° im {dir_culm} -> Sternbild {const_de})\n"
+                                             f"• Verschwinden: ca. {dt_set.strftime('%H:%M')} Uhr im {dir_set}")
+                                             
+                                events.append({"time": dt_culm, "icon": "🛰️", "title": "Heller ISS Überflug", "desc": desc_text})
                                 
             print("ISS Berechnung abgeschlossen.")
             return events
@@ -616,11 +665,11 @@ class AstroCalendarFrame(ctk.CTkFrame):
         for p1_name, p1_obj, p2_name, p2_obj, icon1, icon2 in planet_pairs:
             curr = start_utc
             in_conj = False
-            best_event = None
             
-            # --- NEU: Tracking der Sichtbarkeits-Zeitspanne ---
             vis_start = None
             vis_end = None
+            min_sep_overall = 999.0
+            best_vis_event = None # Speichert nur Momente, an denen es ECHT SICHTBAR ist
             
             while curr <= end_utc:
                 observer.date = curr
@@ -634,57 +683,60 @@ class AstroCalendarFrame(ctk.CTkFrame):
                         in_conj = True
                         vis_start = None
                         vis_end = None
+                        min_sep_overall = 999.0
+                        best_vis_event = None
+                        
+                    # Merke den absoluten Rekordabstand (auch wenn er mittags ist) für den Text
+                    if sep < min_sep_overall:
+                        min_sep_overall = sep
                         
                     sun.compute(observer)
                     alt1 = math.degrees(p1_obj.alt)
                     alt2 = math.degrees(p2_obj.alt)
                     
-                    elongation = math.degrees(ephem.separation(sun, p1_obj))
-                    # Bei extrem hellen Planeten reicht auch bürgerliche Dämmerung (-3°) 
-                    # und eine extrem niedrige Höhe (> 2° statt 5°)!
+                    # Bei extrem hellen Planeten reicht bürgerliche Dämmerung (-3°) und extrem niedrige Höhe (> 2°)
                     is_visible = math.degrees(sun.alt) < -3 and alt1 > 2 and alt2 > 2
                     
-                    # Tracke den sichtbaren Zeitraum!
                     if is_visible:
                         if vis_start is None: vis_start = curr
                         vis_end = curr
-                    
-                    # Suche den engsten Punkt
-                    if best_event is None or sep < best_event['sep']:
-                        best_event = {"time": curr, "sep": sep, "visible": is_visible, "alt": max(alt1, alt2), "best_vis_time": curr, "elongation": elongation}
-                    else:
-                        if is_visible and not best_event['visible']:
-                            best_event.update({"visible": True, "best_vis_time": curr, "alt": max(alt1, alt2)})
+                        
+                        # Wir aktualisieren das "Beste Event" NUR mit Zeiten, in denen es auch dunkel ist!
+                        # Priorität: Der engste Abstand WÄHREND der Sichtbarkeit
+                        if best_vis_event is None or sep < best_vis_event['sep']:
+                            best_vis_event = {
+                                "time": curr, 
+                                "sep": sep, 
+                                "alt": max(alt1, alt2)
+                            }
                 else:
-                    # Konjunktion ist vorbei, werte sie aus
-                    if in_conj and best_event is not None:
-                        if best_event["sep"] <= 5.0: 
-                            dt_local = best_event["best_vis_time"].astimezone(local_tz)
+                    if in_conj:
+                        # Die Konjunktion ist vorbei. Wir werten sie aus!
+                        # WICHTIG: Wurde sie NIE im Dunkeln gesehen (vis_start is None), wird sie IGNORIERT!
+                        if vis_start is not None and best_vis_event is not None and min_sep_overall <= 5.0:
+                            dt_local = best_vis_event["time"].astimezone(local_tz)
                             
-                            observer.date = best_event["best_vis_time"]
+                            observer.date = best_vis_event["time"]
                             p1_obj.compute(observer)
                             const_abbr = ephem.constellation(p1_obj)[0]
                             const_de = const_map.get(const_abbr, const_abbr)
                             direction = get_compass(p1_obj.az)
                             
-                            if best_event["elongation"] < 10: 
-                                vis_str = "Sonne überstrahlt alles."
-                            elif vis_start and vis_end: 
-                                # --- NEU: Zeitspanne formatieren ---
-                                start_str = vis_start.astimezone(local_tz).strftime('%d.%m.')
-                                end_str = vis_end.astimezone(local_tz).strftime('%d.%m.')
-                                if start_str != end_str:
-                                    vis_str = f"Sichtbar ca. vom {start_str} bis {end_str}!"
-                                else:
-                                    vis_str = "Nur heute kurz sichtbar!"
-                            else: 
-                                vis_str = "Schwer zu sehen (Dämmerung/zu tief)."
+                            start_str = vis_start.astimezone(local_tz).strftime('%d.%m.')
+                            end_str = vis_end.astimezone(local_tz).strftime('%d.%m.')
+                            
+                            if start_str != end_str:
+                                vis_str = f"Sichtbar ca. vom {start_str} bis {end_str}!"
+                            else:
+                                vis_str = "Nur heute kurz sichtbar!"
                                 
                             events.append({
-                                "time": dt_local, "icon": f"{icon1}{icon2}", "title": f"Konjunktion: {p1_name} & {p2_name}", 
-                                "desc": f"Engster Abstand: {round(best_event['sep'], 1)}° | {vis_str} (Höhe: {int(best_event['alt'])}°, Richtung {direction}, Sternbild {const_de})."
+                                "time": dt_local, 
+                                "icon": f"{icon1}{icon2}", 
+                                "title": f"Konjunktion: {p1_name} & {p2_name}", 
+                                "desc": f"Engster Abstand: {round(min_sep_overall, 1)}° | {vis_str}\n(Beste Zeit: {dt_local.strftime('%H:%M')} Uhr auf {int(best_vis_event['alt'])}°, Richtung {direction}, Sternbild {const_de})."
                             })
-                        best_event = None
+                        
                     in_conj = False
                 
                 curr += timedelta(hours=3)

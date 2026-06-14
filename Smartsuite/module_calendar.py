@@ -321,8 +321,10 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 min_sun_sep = np.min(sep_sun)
                 min_moon_sep = np.min(sep_moon)
                 
+                # --- STRENGERER TRANSIT-FILTER ---
                 is_transit = False
-                if min_sun_sep < 5.0:
+                # Max 1.5 Grad Abweichung für einen "nahen" Vorbeiflug (Sonne)
+                if min_sun_sep < 1.5:
                     idx = np.argmin(sep_sun)
                     if sun_alt_arr[idx] > 5:
                         t_transit = t_arr[idx]; alt = iss_alt_arr[idx]
@@ -335,7 +337,8 @@ class AstroCalendarFrame(ctk.CTkFrame):
                             events.append({"time": dt_local, "icon": "☀️", "title": "Naher Sonnen-Transit", "desc": f"ISS verfehlt das Zentrum um {round(min_sun_sep, 1)}° (ca. {dist_km} km entfernt). Höhe: {int(alt)}°."})
                         is_transit = True
                         
-                if not is_transit and min_moon_sep < 5.0:
+                # Max 1.5 Grad Abweichung für einen "nahen" Vorbeiflug (Mond)
+                if not is_transit and min_moon_sep < 1.5:
                     idx = np.argmin(sep_moon)
                     if moon_alt_arr[idx] > 5:
                         t_transit = t_arr[idx]; alt = iss_alt_arr[idx]
@@ -615,6 +618,10 @@ class AstroCalendarFrame(ctk.CTkFrame):
             in_conj = False
             best_event = None
             
+            # --- NEU: Tracking der Sichtbarkeits-Zeitspanne ---
+            vis_start = None
+            vis_end = None
+            
             while curr <= end_utc:
                 observer.date = curr
                 p1_obj.compute(observer)
@@ -623,39 +630,59 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 sep = math.degrees(ephem.separation(p1_obj, p2_obj))
                 
                 if sep < 6.0: 
-                    if not in_conj: in_conj = True
+                    if not in_conj: 
+                        in_conj = True
+                        vis_start = None
+                        vis_end = None
                         
                     sun.compute(observer)
                     alt1 = math.degrees(p1_obj.alt)
                     alt2 = math.degrees(p2_obj.alt)
                     
                     elongation = math.degrees(ephem.separation(sun, p1_obj))
-                    is_visible = math.degrees(sun.alt) < -5 and alt1 > 5 and alt2 > 5
+                    # Bei extrem hellen Planeten reicht auch bürgerliche Dämmerung (-3°) 
+                    # und eine extrem niedrige Höhe (> 2° statt 5°)!
+                    is_visible = math.degrees(sun.alt) < -3 and alt1 > 2 and alt2 > 2
                     
+                    # Tracke den sichtbaren Zeitraum!
+                    if is_visible:
+                        if vis_start is None: vis_start = curr
+                        vis_end = curr
+                    
+                    # Suche den engsten Punkt
                     if best_event is None or sep < best_event['sep']:
                         best_event = {"time": curr, "sep": sep, "visible": is_visible, "alt": max(alt1, alt2), "best_vis_time": curr, "elongation": elongation}
                     else:
                         if is_visible and not best_event['visible']:
                             best_event.update({"visible": True, "best_vis_time": curr, "alt": max(alt1, alt2)})
                 else:
+                    # Konjunktion ist vorbei, werte sie aus
                     if in_conj and best_event is not None:
                         if best_event["sep"] <= 5.0: 
                             dt_local = best_event["best_vis_time"].astimezone(local_tz)
                             
-                            # Sternbild & Richtung für den engsten Zeitpunkt berechnen
                             observer.date = best_event["best_vis_time"]
                             p1_obj.compute(observer)
                             const_abbr = ephem.constellation(p1_obj)[0]
                             const_de = const_map.get(const_abbr, const_abbr)
                             direction = get_compass(p1_obj.az)
                             
-                            if best_event["elongation"] < 10: vis_str = "Sonne überstrahlt alles."
-                            elif best_event["visible"]: vis_str = "Gute Sichtbarkeit möglich!"
-                            else: vis_str = "Schwer zu sehen (Dämmerung/zu tief)."
+                            if best_event["elongation"] < 10: 
+                                vis_str = "Sonne überstrahlt alles."
+                            elif vis_start and vis_end: 
+                                # --- NEU: Zeitspanne formatieren ---
+                                start_str = vis_start.astimezone(local_tz).strftime('%d.%m.')
+                                end_str = vis_end.astimezone(local_tz).strftime('%d.%m.')
+                                if start_str != end_str:
+                                    vis_str = f"Sichtbar ca. vom {start_str} bis {end_str}!"
+                                else:
+                                    vis_str = "Nur heute kurz sichtbar!"
+                            else: 
+                                vis_str = "Schwer zu sehen (Dämmerung/zu tief)."
                                 
                             events.append({
                                 "time": dt_local, "icon": f"{icon1}{icon2}", "title": f"Konjunktion: {p1_name} & {p2_name}", 
-                                "desc": f"Abstand: {round(best_event['sep'], 1)}° | {vis_str} (Höhe: {int(best_event['alt'])}°, Richtung {direction}, Sternbild {const_de})."
+                                "desc": f"Engster Abstand: {round(best_event['sep'], 1)}° | {vis_str} (Höhe: {int(best_event['alt'])}°, Richtung {direction}, Sternbild {const_de})."
                             })
                         best_event = None
                     in_conj = False

@@ -3,9 +3,7 @@
 # ==============================================================================
 import smart_gui
 import sys
-
-# Wir laden die Version zentral aus der version.py
-import version
+import version # Lade die Version zentral
 
 if __name__ == "__main__":
     start_mode = None

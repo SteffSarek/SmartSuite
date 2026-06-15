@@ -278,7 +278,6 @@ class ObsListFrame(ctk.CTkFrame):
         top_frame.pack(fill="x", padx=20, pady=10)
         ctk.CTkLabel(top_frame, text="📋 Kombinierte Beobachtungsliste", font=("Arial", 18, "bold")).pack(side="left", padx=10, pady=10)
         
-        # --- EXPORT BUTTONS SIND WIEDER DA! ---
         btn_frame = ctk.CTkFrame(top_frame, fg_color="transparent")
         btn_frame.pack(side="right")
         
@@ -290,7 +289,6 @@ class ObsListFrame(ctk.CTkFrame):
         
         self.btn_pdf = ctk.CTkButton(btn_frame, text="🖨️ PDF", width=60, fg_color="#8e44ad", command=self.export_pdf_html)
         self.btn_pdf.pack(side="left", padx=5)
-        # --------------------------------------
         
         self.weather_container = ctk.CTkFrame(self, fg_color="#141414", border_width=1, border_color="#34495e", corner_radius=8, cursor="hand2")
         self.weather_container.pack(fill="x", padx=20, pady=(0, 5))
@@ -319,7 +317,6 @@ class ObsListFrame(ctk.CTkFrame):
         self.scroll_events = ctk.CTkScrollableFrame(self.tab_events, fg_color="transparent")
         self.scroll_events.pack(fill="both", expand=True)
         
-        # --- EINGABEMASKE FÜR ZIELE ---
         self.target_input_frame = ctk.CTkFrame(self.tab_targets, fg_color="#1a1a1a", border_width=1, border_color="#3498db")
         self.target_input_frame.pack(fill="x", padx=5, pady=(5, 10))
         
@@ -334,10 +331,8 @@ class ObsListFrame(ctk.CTkFrame):
         self.btn_search_target = ctk.CTkButton(input_row, text="🔍 Suchen", width=80, fg_color="#2980b9", hover_color="#3498db", command=self.search_manual_target)
         self.btn_search_target.pack(side="left", padx=(0, 10))
         
-        # --- NEUER STELLARIUM BUTTON ---
         self.btn_stellarium_get = ctk.CTkButton(input_row, text="🌌 Aus Stellarium übernehmen", width=180, fg_color="#8e44ad", hover_color="#9b59b6", command=self.get_from_stellarium)
         self.btn_stellarium_get.pack(side="left", padx=(0, 10))
-        # -------------------------------
         
         self.target_note_entry = ctk.CTkEntry(input_row, placeholder_text="Notiz (Optional)")
         self.target_note_entry.pack(side="left", padx=(0, 10), expand=True, fill="x")
@@ -354,12 +349,11 @@ class ObsListFrame(ctk.CTkFrame):
         self.target_name_entry.bind("<KeyRelease>", self._on_name_change)
         self.target_name_entry.bind("<Return>", lambda e: self.search_manual_target())
         self.target_note_entry.bind("<Return>", lambda e: self.add_manual_target() if self.btn_add_target.cget("state") == "normal" else None)
-        # -----------------------------------
 
         self.scroll_targets = ctk.CTkScrollableFrame(self.tab_targets, fg_color="transparent")
         self.scroll_targets.pack(fill="both", expand=True)
         
-        self.refresh_ui()
+        self.after(100, self.refresh_ui)
 
     def _on_name_change(self, event=None):
         self.btn_add_target.configure(state="disabled")
@@ -397,11 +391,7 @@ class ObsListFrame(ctk.CTkFrame):
         self._temp_search_result = None
         self.preview_lbl.configure(text="❌ Objekt nicht gefunden. Bitte Schreibweise prüfen.", text_color="#e74c3c")
         
-    # =======================================================
-    # STELLARIUM INTEGRATION
-    # =======================================================
     def get_from_stellarium(self):
-        """Holt das aktuell markierte Objekt inkl. Koordinaten aus Stellarium"""
         self.btn_stellarium_get.configure(state="disabled", text="⏳...")
         self.update_idletasks()
         
@@ -416,15 +406,12 @@ class ObsListFrame(ctk.CTkFrame):
                     if not name:
                         name = "Stellarium Ziel"
                         
-                    # Wir greifen die Koordinaten DIREKT aus Stellarium ab!
                     ra_deg = data.get("raJ2000", data.get("ra", None))
                     dec_deg = data.get("decJ2000", data.get("dec", None))
                     
                     if ra_deg is not None and dec_deg is not None:
-                        # Erfolgs-Bypass: Wir haben Koordinaten, Simbad wird übersprungen!
                         self.after(0, lambda n=name, r=ra_deg, d=dec_deg: self._apply_stellarium_direct(n, r, d))
                     elif name != "Stellarium Ziel":
-                        # Fallback: Keine Koordinaten geliefert (sehr selten), versuche Simbad-Suche
                         self.after(0, lambda n=name: self._apply_stellarium_target(n))
                     else:
                         self.after(0, lambda: messagebox.showinfo("Stellarium", "Es ist gerade kein Objekt in Stellarium markiert!"))
@@ -438,18 +425,15 @@ class ObsListFrame(ctk.CTkFrame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_stellarium_direct(self, name, ra, dec):
-        """Bypassed Simbad und übernimmt Koordinaten direkt in die GUI"""
         self.target_name_entry.delete(0, "end")
         self.target_name_entry.insert(0, name)
         self.target_note_entry.delete(0, "end")
         self.target_note_entry.insert(0, "Aus Stellarium importiert")
         
         try:
-            # Koordinaten für die Anzeige hübsch formatieren
             coord = SkyCoord(ra=ra*u.deg, dec=dec*u.deg)
             coords_str = f"RA: {coord.ra.to_string(unit=u.hour, sep=' ', pad=True, precision=0)} | DEC: {coord.dec.to_string(sep=' ', pad=True, alwayssign=True, precision=0)}"
             
-            # Der Trick: Wir füttern das Zwischenergebnis, als hätte Simbad es gefunden!
             self._temp_search_result = {
                 "name": name,
                 "ra": ra,
@@ -460,13 +444,11 @@ class ObsListFrame(ctk.CTkFrame):
             self.btn_search_target.configure(state="normal", text="🔍 Suchen")
             self.btn_add_target.configure(state="normal")
             
-            # Feedback an den User in Lila (Stellarium-Farbe)
             self.preview_lbl.configure(text=f"🌌 Importiert: {coords_str}", text_color="#9b59b6")
         except Exception as e:
             self._search_failed(str(e))
 
     def _apply_stellarium_target(self, name):
-        """Standard-Weg, wenn wir nur den Namen haben"""
         self.target_name_entry.delete(0, "end")
         self.target_name_entry.insert(0, name)
         self.target_note_entry.delete(0, "end")
@@ -474,25 +456,19 @@ class ObsListFrame(ctk.CTkFrame):
         self.search_manual_target()
 
     def send_to_stellarium(self, target_name, ra_deg=None, dec_deg=None):
-        """Schwenkt Stellarium auf das Objekt oder erzwingt einen Koordinaten-Schwenk"""
         def worker():
             try:
-                # 1. Versuch: Über den Namen markieren (Stellarium trackt das Objekt dann)
                 url_focus = "http://localhost:8090/api/main/focus"
                 r = requests.post(url_focus, params={"target": target_name, "sync": "true"}, timeout=2)
                 
                 if r.status_code == 200 and r.text.strip().lower() == "true":
-                    return # Erfolg, Stellarium kannte den Namen!
+                    return 
                     
-                # 2. Versuch: Fallback auf reine Koordinaten
                 if ra_deg is not None and dec_deg is not None:
-                    # GANZ WICHTIG: Zuerst das aktuelle Ziel leeren!
-                    # Das bricht das aktive Tracking ab, sonst weigert sich die Kamera oft zu schwenken.
                     requests.post(url_focus, params={"target": ""}, timeout=1)
                     
                     url_view = "http://localhost:8090/api/main/view"
                     
-                    # Stellarium erwartet einen mathematischen 3D-Vektor
                     ra_rad = math.radians(ra_deg)
                     dec_rad = math.radians(dec_deg)
                     
@@ -500,7 +476,6 @@ class ObsListFrame(ctk.CTkFrame):
                     y = math.cos(dec_rad) * math.sin(ra_rad)
                     z = math.sin(dec_rad)
                     
-                    # WICHTIG: payload an 'params' übergeben, nicht an 'data'!
                     payload = {"j2000": f"[{x},{y},{z}]"}
                     requests.post(url_view, params=payload, timeout=2)
                     
@@ -569,16 +544,12 @@ class ObsListFrame(ctk.CTkFrame):
             except Exception as e: messagebox.showerror("Fehler", f"Konnte Ziel nicht entfernen:\n{e}")
             
     def edit_target_name(self, raw_key, current_name):
-        """Erlaubt das Ändern des Namens mit vorausgefülltem Textfeld."""
-        
-        # Eigenes kleines Popup-Fenster erstellen
         dialog = ctk.CTkToplevel(self)
         dialog.title("Namen bearbeiten")
         dialog.geometry("400x180")
-        dialog.attributes("-topmost", True) # Bleibt immer im Vordergrund
-        dialog.grab_set() # Blockiert das Hauptfenster, bis der Dialog zu ist
+        dialog.attributes("-topmost", True) 
+        dialog.grab_set() 
         
-        # Versucht das Fenster grob mittig zu platzieren
         dialog.update_idletasks()
         x = self.winfo_rootx() + (self.winfo_width() // 2) - 200
         y = self.winfo_rooty() + (self.winfo_height() // 2) - 90
@@ -586,17 +557,14 @@ class ObsListFrame(ctk.CTkFrame):
 
         ctk.CTkLabel(dialog, text="Neuer Name (für Anzeige & Stellarium):", font=("Arial", 14, "bold")).pack(pady=(20, 10))
         
-        # Textfeld erstellen und alten Namen einfügen
         entry = ctk.CTkEntry(dialog, width=320, font=("Arial", 14))
         entry.pack(pady=5)
         entry.insert(0, current_name)
-        entry.focus() # Setzt den Cursor direkt ins Textfeld
+        entry.focus() 
         
-        # Die eigentliche Speicher-Logik
         def save_new_name(event=None):
             new_name = entry.get().strip()
             
-            # Nur speichern, wenn sich wirklich was geändert hat und es nicht leer ist
             if new_name and new_name != current_name:
                 notes_path, cache_path, _ = get_list_paths()
                 
@@ -615,21 +583,16 @@ class ObsListFrame(ctk.CTkFrame):
                     except Exception as e: 
                         messagebox.showerror("Fehler", f"Konnte Name nicht ändern:\n{e}")
             
-            dialog.destroy() # Fenster danach schließen
+            dialog.destroy() 
 
-        # Erlaubt das Speichern per Druck auf die "Enter" Taste
         entry.bind("<Return>", save_new_name)
         
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_frame.pack(pady=15)
         
-        # Buttons
         ctk.CTkButton(btn_frame, text="Abbrechen", width=100, fg_color="#c0392b", hover_color="#e74c3c", command=dialog.destroy).pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="Speichern", width=100, fg_color="#27ae60", hover_color="#2ecc71", command=save_new_name).pack(side="right", padx=10)
 
-    # =======================================================
-    # RENDERING & WETTER
-    # =======================================================
     def open_weather_website(self, event=None):
         lat_str = f"{abs(self.weather_lat):.2f}N" if self.weather_lat >= 0 else f"{abs(self.weather_lat):.2f}S"
         lon_str = f"{abs(self.weather_lon):.2f}E" if self.weather_lon >= 0 else f"{abs(self.weather_lon):.2f}W"
@@ -756,7 +719,6 @@ class ObsListFrame(ctk.CTkFrame):
         hint_radar.bind("<Button-1>", self.open_cloud_radar)
 
     def generate_night_plan(self, targets):
-        """Erstellt ZWEI getrennte Zeitpläne (Nord/Süd) für die heutige Nacht."""
         cfg = utils.load_config()
         lat = float(cfg.get("default_lat", 51.16))
         lon = float(cfg.get("default_lon", 10.45))
@@ -787,7 +749,6 @@ class ObsListFrame(ctk.CTkFrame):
 
         valid_targets = [t for t in targets if t.get('ra') is not None]
 
-        # Interne Hilfsfunktion für den doppelten Durchlauf (einmal Nord, einmal Süd)
         def build_plan_for_hemisphere(is_south):
             plan = []
             current_time = plan_start
@@ -810,7 +771,6 @@ class ObsListFrame(ctk.CTkFrame):
                     alt = altaz.alt.deg
                     az = altaz.az.deg
 
-                    # Filter Nord/Süd (Süd ist alles zwischen 90°(Osten) und 270°(Westen))
                     target_is_south = (90 <= az <= 270)
                     if is_south and not target_is_south: continue
                     if not is_south and target_is_south: continue
@@ -825,7 +785,7 @@ class ObsListFrame(ctk.CTkFrame):
                             best_score = current_score
                             best_target = t
                             best_target['_temp_alt'] = alt
-                            best_target['_temp_az'] = az # Speichere den Azimut für den Kompass
+                            best_target['_temp_az'] = az 
 
                 if best_target:
                     plan.append({
@@ -841,7 +801,6 @@ class ObsListFrame(ctk.CTkFrame):
                     current_time += timedelta(minutes=30)
             return plan
 
-        # Wir geben ein Dictionary mit beiden fertigen Plänen zurück
         return {
             "Süd": build_plan_for_hemisphere(is_south=True),
             "Nord": build_plan_for_hemisphere(is_south=False)
@@ -869,7 +828,6 @@ class ObsListFrame(ctk.CTkFrame):
             for e in events_today:
                 ctk.CTkLabel(e_frame, text=f"{e.get('icon','')} {e['title']} - {e['time']}\n{e['desc']}", justify="left").pack(anchor="w", padx=10, pady=(5,10))
                 
-        # --- TELESKOP-PLÄNE (NORD & SÜD) ---
         night_plans = {"Süd": [], "Nord": []}
         if self.last_targets:
             night_plans = self.generate_night_plan(self.last_targets)
@@ -885,7 +843,6 @@ class ObsListFrame(ctk.CTkFrame):
                 p_list = night_plans.get(hemi, [])
                 if not p_list: continue
                 
-                # Überschrift für die Himmelsrichtung
                 ctk.CTkLabel(t_frame, text=f"Blickrichtung {hemi}:", font=("Arial", 13, "bold"), text_color="#3498db").pack(anchor="w", padx=15, pady=(10,2))
                 
                 for idx, block in enumerate(p_list):
@@ -893,7 +850,7 @@ class ObsListFrame(ctk.CTkFrame):
                     e_str = block['end'].strftime('%H:%M')
                     t_name = block['target']['name']
                     alt = int(block['alt'])
-                    comp = az_to_compass(block['az']) # Kompass-Richtung
+                    comp = az_to_compass(block['az']) 
                     
                     bg_color = "#242424" if idx % 2 == 0 else "#2a2a2a"
                     row_frame = ctk.CTkFrame(t_frame, fg_color=bg_color, corner_radius=4)
@@ -962,30 +919,26 @@ class ObsListFrame(ctk.CTkFrame):
             import webbrowser
             webbrowser.open("https://chatgpt.com/")
 
-    # --- DIE FIXIERTE LÖSCHFUNKTION & GUI UPDATE ---
     def delete_event(self, event_id, fallback_title=None, fallback_date=None):
         remove_event(event_id, fallback_title, fallback_date)
         self.refresh_ui()
 
     def _handle_missing_target_list(self):
-        """Fragt den Nutzer, was passieren soll, wenn die Liste fehlt."""
         msg = ("Es wurde keine Beobachtungsliste (user_notes.json) gefunden.\n\n"
                "Hast du den AstroArchive Explorer? Klicke auf 'Ja', um den Ordner auszuwählen.\n"
                "Möchtest du eine völlig neue, leere Liste anlegen? Klicke auf 'Nein'.")
                
-        # Ja = Suchen, Nein = Neu erstellen, Abbrechen = Ignorieren
         reply = messagebox.askyesnocancel("Beobachtungsliste fehlt", msg)
         
         cfg = utils.load_config()
         
-        if reply is True: # Suchen
+        if reply is True: 
             d = filedialog.askdirectory(title="Ordner mit user_notes.json auswählen")
             if d:
                 cfg["custom_tools_path"] = os.path.normpath(d)
                 utils.save_config("custom_tools_path", cfg["custom_tools_path"])
                 
-        elif reply is False: # Neu erstellen
-            # Wir legen die Dateien sauber im AstroData Ordner ab
+        elif reply is False: 
             new_dir = utils.get_data_dir()
             cfg["custom_tools_path"] = new_dir
             utils.save_config("custom_tools_path", new_dir)
@@ -1032,11 +985,9 @@ class ObsListFrame(ctk.CTkFrame):
         
         self.last_targets = load_aae_targets_rich()
         
-        # NEU: Falls die Datei fehlt, starten wir den Abfrage-Dialog
         if self.last_targets is None:
             lbl_loading.configure(text="Warte auf Benutzereingabe...")
             self._handle_missing_target_list()
-            # Nach dem Dialog versuchen wir es einfach nochmal
             self.last_targets = load_aae_targets_rich()
             
         lbl_loading.destroy()
@@ -1044,7 +995,6 @@ class ObsListFrame(ctk.CTkFrame):
         local_tz = pytz.timezone('Europe/Berlin')
         
         if self.last_targets is None:
-            # Falls der Nutzer im Dialog auf "Abbrechen" geklickt hat
             ctk.CTkLabel(self.scroll_targets, text="Beobachtungsliste nicht konfiguriert.\n\nStarte das Programm neu oder setze den Pfad in den Einstellungen.", text_color="#e74c3c").pack(pady=50)
         elif len(self.last_targets) == 0:
             ctk.CTkLabel(self.scroll_targets, text="Beobachtungsliste leer.", text_color="gray").pack(pady=50)
@@ -1065,11 +1015,9 @@ class ObsListFrame(ctk.CTkFrame):
                 ctk.CTkLabel(title_frame, text=icon, font=("Arial", 20)).pack(side="left", padx=(0, 10))
                 ctk.CTkLabel(title_frame, text=item["name"], font=("Arial", 16, "bold"), text_color="#f1c40f", anchor="w").pack(side="left")
                 
-                # --- NEUER BEARBEITEN BUTTON ---
                 btn_edit = ctk.CTkButton(title_frame, text="✏️", width=24, height=24, fg_color="transparent", hover_color="#2c3e50")
                 btn_edit.configure(command=lambda k=item["raw_key"], n=item["name"]: self.edit_target_name(k, n))
                 btn_edit.pack(side="left", padx=(10, 0))
-                # -------------------------------
                 
                 coord_frame = ctk.CTkFrame(left_block, fg_color="transparent")
                 coord_frame.pack(fill="x", pady=(2, 5))
@@ -1085,12 +1033,28 @@ class ObsListFrame(ctk.CTkFrame):
                     btn_copy.configure(command=do_copy)
                     btn_copy.pack(side="left", padx=10)
                     
-                    # --- NEUER STELLARIUM BUTTON ---
                     btn_stellarium = ctk.CTkButton(coord_frame, text="🔭 In Stellarium zeigen", height=24, fg_color="transparent", text_color="#8e44ad", border_color="#8e44ad", border_width=1, hover_color="#3e1a3a")
-                    # WICHTIG: Nutzt jetzt strikt item["name"], was unserem korrigierten display_name entspricht!
                     btn_stellarium.configure(command=lambda n=item["name"], r=item.get("ra"), d=item.get("dec"): self.send_to_stellarium(n, r, d))
                     btn_stellarium.pack(side="left", padx=5)
-                    # -------------------------------
+                    
+                    btn_nina_push = ctk.CTkButton(coord_frame, text="🌌 An N.I.N.A. senden", height=24, fg_color="transparent", text_color="#e74c3c", border_color="#e74c3c", border_width=1, hover_color="#3e1a1a")
+                    
+                    def push_to_nina(n=item["name"], r=item.get("ra"), d=item.get("dec")):
+                        def worker():
+                            try:
+                                url = f"http://localhost:1888/v2/api/framing/set-coordinates?RAangle={r}&DecAngle={d}"
+                                res = requests.get(url, timeout=2)
+                                if res.status_code == 200:
+                                    pass
+                                else:
+                                    self.after(0, lambda: messagebox.showwarning("N.I.N.A.", f"N.I.N.A. meldet Fehler: {res.status_code}"))
+                            except Exception as e:
+                                self.after(0, lambda: messagebox.showwarning("N.I.N.A.", "Keine Verbindung zu N.I.N.A.\n\nIst N.I.N.A. geöffnet?"))
+                                
+                        threading.Thread(target=worker, daemon=True).start()
+                        
+                    btn_nina_push.configure(command=push_to_nina)
+                    btn_nina_push.pack(side="left", padx=5)
                 
                 if item["note"]: ctk.CTkLabel(left_block, text=f"📝 {item['note']}", font=("Arial", 12), text_color="gray", anchor="w", justify="left").pack(fill="x")
 
@@ -1158,9 +1122,11 @@ class ObsListFrame(ctk.CTkFrame):
                     canvas.get_tk_widget().pack(fill="both", expand=True)
 
         if not self.last_events and not self.last_targets:
-            self.btn_ics.configure(state="disabled"); self.btn_pdf.configure(state="disabled")
+            self.btn_ics.configure(state="disabled")
+            self.btn_pdf.configure(state="disabled")
         else:
-            self.btn_ics.configure(state="normal"); self.btn_pdf.configure(state="normal")
+            self.btn_ics.configure(state="normal")
+            self.btn_pdf.configure(state="normal")
             
         self.render_tonight_tab()
 
@@ -1210,7 +1176,7 @@ class ObsListFrame(ctk.CTkFrame):
             messagebox.showinfo("Export erfolgreich", "Kalenderdatei gespeichert!")
         except Exception as e:
             messagebox.showerror("Fehler", f"Konnte ICS nicht erstellen:\n{e}")
-
+    
     def export_mobile_app(self):
         events = load_list()
         targets = load_aae_targets_rich()

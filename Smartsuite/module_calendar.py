@@ -418,6 +418,13 @@ class AstroCalendarFrame(ctk.CTkFrame):
             events.append({"time": datetime.now(local_tz), "icon": "⚠️", "title": "Fehler bei ISS-Berechnung", "desc": f"Technischer Fehler: {str(e)}"})
             return events
 
+    # --- HILFSFUNKTIONEN FÜR RICHTUNG UND STERNBILDER ---
+    def _get_compass(self, az_rad):
+        """Rechnet Bogenmaß in klassische Kompassrichtungen (N, NO, SW etc.) um"""
+        az_deg = math.degrees(az_rad)
+        dirs = ["N", "NNO", "NO", "ONO", "O", "OSO", "SO", "SSO", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+        return dirs[int((az_deg + 11.25) / 22.5) % 16]
+
     # ==========================================
     # BERECHNUNG: DAS JAHRESPROGRAMM
     # ==========================================
@@ -435,6 +442,14 @@ class AstroCalendarFrame(ctk.CTkFrame):
         observer.elevation = 150
         moon = ephem.Moon()
         sun = ephem.Sun()
+        
+        const_map = {
+            'Ari': 'Widder', 'Tau': 'Stier', 'Gem': 'Zwillinge', 'Cnc': 'Krebs',
+            'Leo': 'Löwe', 'Vir': 'Jungfrau', 'Lib': 'Waage', 'Sco': 'Skorpion',
+            'Sgr': 'Schütze', 'Cap': 'Steinbock', 'Aqr': 'Wassermann', 'Psc': 'Fische',
+            'Oph': 'Schlangenträger', 'Cet': 'Walfisch', 'Ori': 'Orion', 'Aur': 'Fuhrmann',
+            'Sex': 'Sextant', 'UMa': 'Großer Bär', 'Peg': 'Pegasus', 'Cyg': 'Schwan'
+        }
         
         events = []
         start_utc = datetime(current_year, 1, 1, tzinfo=pytz.utc)
@@ -605,46 +620,51 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 dt_local = seps[i][0].astimezone(local_tz).replace(hour=20, minute=0)
                 events.append({"time": dt_local, "icon": "⚪", "title": "Venus: Größte Elongation", "desc": "Maximaler scheinbarer Abstand zur Sonne."})
 
+        # --- 4a. MOND KONJUNKTIONEN (Mond trifft Planet) ---
         bright_planets_conj = [
+            ("Merkur", ephem.Mercury(), "🟤"),
             ("Venus", ephem.Venus(), "⚪"),
             ("Mars", ephem.Mars(), "🔴"),
             ("Jupiter", ephem.Jupiter(), "🟠"),
             ("Saturn", ephem.Saturn(), "🪐")
         ]
         for p_name, p_obj, p_icon in bright_planets_conj:
-            in_conj = False; curr = start_utc; best_event = None
+            in_conj = False
+            curr = start_utc
+            best_event = None
+            
             while curr <= end_utc:
                 observer.date = curr
-                moon.compute(observer); p_obj.compute(observer); sun.compute(observer)
+                moon.compute(observer)
+                p_obj.compute(observer)
+                sun.compute(observer)
                 sep = math.degrees(ephem.separation(moon, p_obj))
-                is_visible = math.degrees(moon.alt) > 5 and math.degrees(sun.alt) < -4
+                
+                is_visible = math.degrees(sun.alt) < -3 and math.degrees(moon.alt) > 2 and math.degrees(p_obj.alt) > 2
+                
                 if sep < 6.0 and is_visible:
                     in_conj = True
                     if best_event is None or sep < best_event['sep']:
                         best_event = {"time": curr, "sep": sep, "phase": moon.phase, "alt": math.degrees(moon.alt)}
                 else:
                     if in_conj and best_event is not None:
-                        if best_event["sep"] <= 4.5: 
+                        if best_event["sep"] <= 5.0: 
                             dt_local = best_event["time"].astimezone(local_tz)
-                            events.append({"time": dt_local, "icon": p_icon, "title": f"Mond trifft {p_name}", "desc": f"Schöne Konjunktion! Engster sichtbarer Abstand: {round(best_event['sep'], 1)}°. Mondphase: {int(best_event['phase'])}%. Höhe: {int(best_event['alt'])}°."})
+                            
+                            observer.date = best_event["time"]
+                            moon.compute(observer)
+                            direction = self._get_compass(moon.az)
+                            
+                            events.append({
+                                "time": dt_local, 
+                                "icon": p_icon, 
+                                "title": f"Mond trifft {p_name}", 
+                                "desc": f"Schöne Konjunktion! Engster sichtbarer Abstand: {round(best_event['sep'], 1)}°.\n(Beste Zeit: {dt_local.strftime('%H:%M')} Uhr auf {int(best_event['alt'])}° Höhe in Richtung {direction}. Mondphase: {int(best_event['phase'])}%)."
+                            })
                         best_event = None
                     in_conj = False
                 curr += timedelta(hours=1)
 
-        # --- HILFSFUNKTIONEN FÜR RICHTUNG UND STERNBILDER ---
-        const_map = {
-            'Ari': 'Widder', 'Tau': 'Stier', 'Gem': 'Zwillinge', 'Cnc': 'Krebs',
-            'Leo': 'Löwe', 'Vir': 'Jungfrau', 'Lib': 'Waage', 'Sco': 'Skorpion',
-            'Sgr': 'Schütze', 'Cap': 'Steinbock', 'Aqr': 'Wassermann', 'Psc': 'Fische',
-            'Oph': 'Schlangenträger', 'Cet': 'Walfisch', 'Ori': 'Orion', 'Aur': 'Fuhrmann',
-            'Sex': 'Sextant', 'UMa': 'Großer Bär', 'Peg': 'Pegasus', 'Cyg': 'Schwan'
-        }
-
-        def get_compass(az_rad):
-            """Rechnet Bogenmaß in klassische Kompassrichtungen (N, NO, SW etc.) um"""
-            az_deg = math.degrees(az_rad)
-            dirs = ["N", "NNO", "NO", "ONO", "O", "OSO", "SO", "SSO", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
-            return dirs[int((az_deg + 11.25) / 22.5) % 16]
 
         # --- 4b. PLANETEN KONJUNKTIONEN (Alle Planeten) ---
         planet_list = [
@@ -669,7 +689,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
             vis_start = None
             vis_end = None
             min_sep_overall = 999.0
-            best_vis_event = None # Speichert nur Momente, an denen es ECHT SICHTBAR ist
+            best_vis_event = None 
             
             while curr <= end_utc:
                 observer.date = curr
@@ -686,7 +706,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
                         min_sep_overall = 999.0
                         best_vis_event = None
                         
-                    # Merke den absoluten Rekordabstand (auch wenn er mittags ist) für den Text
                     if sep < min_sep_overall:
                         min_sep_overall = sep
                         
@@ -694,15 +713,12 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     alt1 = math.degrees(p1_obj.alt)
                     alt2 = math.degrees(p2_obj.alt)
                     
-                    # Bei extrem hellen Planeten reicht bürgerliche Dämmerung (-3°) und extrem niedrige Höhe (> 2°)
                     is_visible = math.degrees(sun.alt) < -3 and alt1 > 2 and alt2 > 2
                     
                     if is_visible:
                         if vis_start is None: vis_start = curr
                         vis_end = curr
                         
-                        # Wir aktualisieren das "Beste Event" NUR mit Zeiten, in denen es auch dunkel ist!
-                        # Priorität: Der engste Abstand WÄHREND der Sichtbarkeit
                         if best_vis_event is None or sep < best_vis_event['sep']:
                             best_vis_event = {
                                 "time": curr, 
@@ -711,8 +727,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
                             }
                 else:
                     if in_conj:
-                        # Die Konjunktion ist vorbei. Wir werten sie aus!
-                        # WICHTIG: Wurde sie NIE im Dunkeln gesehen (vis_start is None), wird sie IGNORIERT!
                         if vis_start is not None and best_vis_event is not None and min_sep_overall <= 5.0:
                             dt_local = best_vis_event["time"].astimezone(local_tz)
                             
@@ -720,7 +734,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
                             p1_obj.compute(observer)
                             const_abbr = ephem.constellation(p1_obj)[0]
                             const_de = const_map.get(const_abbr, const_abbr)
-                            direction = get_compass(p1_obj.az)
+                            direction = self._get_compass(p1_obj.az)
                             
                             start_str = vis_start.astimezone(local_tz).strftime('%d.%m.')
                             end_str = vis_end.astimezone(local_tz).strftime('%d.%m.')
@@ -789,7 +803,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     if spread < 160.0:
                         dt_local = self.ephem_to_local(t_check, local_tz)
                         # Blickrichtung aus dem Minimum/Maximum Azimut ableiten
-                        dir_str = f"{get_compass(min(az_list))} bis {get_compass(max(az_list))}"
+                        dir_str = f"{self._get_compass(min(az_list))} bis {self._get_compass(max(az_list))}"
                         
                         events.append({
                             "time": dt_local, "icon": "🌌", "title": f"Große Planetenparade ({time_name})", 
@@ -824,7 +838,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
             radiant = ephem.readdb(f"Radiant,f|S,{ra_str},{dec_str},0,2000")
             radiant.compute(observer)
             rad_alt = math.degrees(radiant.alt)
-            direction = get_compass(radiant.az)
+            direction = self._get_compass(radiant.az)
             
             if rad_alt < 0:
                 rad_str = f"Der Radiant ({const_name}) geht erst später in der Nacht auf (Richtung {direction})."

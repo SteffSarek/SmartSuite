@@ -200,13 +200,77 @@ class AstroModuleBase(ctk.CTkFrame):
     def export_to_smartsuite_list(self, item):
         row_values = self.tree.item(item, 'values')
         obj_name = str(row_values[0]).replace("🔗 ", "").strip()
-        coords_str = self.get_coords_from_item(item)
-        if not coords_str: return
-        parts = coords_str.split()
-        if len(parts) == 2:
-            ra_dec = self._parse_ra_to_decimal(parts[0])
-            dec_dec = self._parse_dec_to_decimal(parts[1])
-        else: return
+        
+        # NEU: Wir fragen den Nutzer nach dem geplanten Beobachtungszeitpunkt
+        # Standardmäßig schlagen wir heute Abend 22:00 Uhr UTC vor
+        default_time = datetime.datetime.now(datetime.timezone.utc).replace(hour=22, minute=0, second=0).strftime('%Y-%m-%d %H:%M')
+        
+        # Wenn es ein Supernova-Modul ist, fragen wir nicht nach der Zeit (SN bewegen sich nicht)
+        if self.obj_type_name == "Supernova":
+            res = default_time 
+        else:
+            res = TimeInputDialog(self, default_time=default_time).result
+            
+        if not res: return # Abbruch durch den Nutzer
+        
+        try:
+            obs_time = datetime.datetime.strptime(res, "%Y-%m-%d %H:%M").replace(tzinfo=datetime.timezone.utc)
+        except:
+            messagebox.showerror("Fehler", "Falsches Datums-/Zeitformat.")
+            return
+
+        # NEU: Berechne die Koordinaten für diesen Zukunfts-Moment!
+        coords_str = None
+        ra_dec = None
+        dec_dec = None
+        
+        try:
+            ts = sky_loader.timescale()
+            t_o = ts.from_datetime(obs_time)
+            eph = sky_loader('de421.bsp')
+            cfg = utils.load_config()
+            lat = float(cfg.get("default_lat", 51.16))
+            lon = float(cfg.get("default_lon", 10.45))
+            observer = (eph['earth'] + wgs84.latlon(lat, lon)).at(t_o)
+            
+            target_orb = None
+            if self.obj_type_name == "Comet" and hasattr(self, 'raw_comets_df'):
+                rows = self.raw_comets_df[self.raw_comets_df['designation'] == obj_name]
+                if not rows.empty:
+                    from skyfield.constants import GM_SUN_Pitjeva_2005_km3_s2 as GM_SUN
+                    target_orb = eph['sun'] + mpc.comet_orbit(rows.iloc[0], ts, GM_SUN)
+            elif self.obj_type_name == "Asteroid" and hasattr(self, 'raw_asteroids_df'):
+                rows = self.raw_asteroids_df[self.raw_asteroids_df['designation'] == obj_name]
+                if not rows.empty:
+                    from skyfield.constants import GM_SUN_Pitjeva_2005_km3_s2 as GM_SUN
+                    target_orb = eph['sun'] + mpc.mpcorb_orbit(rows.iloc[0], ts, GM_SUN)
+                    
+            if target_orb:
+                obs = observer.observe(target_orb)
+                ra, dec, _ = obs.apparent().radec()
+                ra_dec = ra.hours * 15.0 # In Grad umrechnen (1 Stunde = 15 Grad)
+                dec_dec = dec.degrees
+                
+                h, m, s = ra.hms()
+                abs_d = abs(dec.degrees)
+                dd = int(abs_d)
+                mm = int((abs_d - dd) * 60)
+                ss = (abs_d - dd - mm/60) * 3600
+                c_str = f"RA: {int(h):02d}h {int(m):02d}m {int(s):02d}s | DEC: {'+' if dec.degrees>=0 else '-'}{dd:02d}d {mm:02d}m {int(ss):02d}s"
+        except Exception as e:
+            self.log(f"Konnte Vorhersage nicht berechnen: {e}")
+            pass
+
+        # FALLBACK: Wenn die Ephemeriden-Vorausberechnung scheitert (oder es eine Supernova ist)
+        if ra_dec is None or dec_dec is None:
+            coords_str_fallback = self.get_coords_from_item(item)
+            if not coords_str_fallback: return
+            parts = coords_str_fallback.split()
+            if len(parts) == 2:
+                ra_dec = self._parse_ra_to_decimal(parts[0])
+                dec_dec = self._parse_dec_to_decimal(parts[1])
+                c_str = f"RA: {parts[0]} | DEC: {parts[1]}"
+            else: return
         
         cfg = utils.load_config()
         target_dir = cfg.get("custom_tools_path", "")
@@ -214,21 +278,15 @@ class AstroModuleBase(ctk.CTkFrame):
         cache_path = os.path.join(target_dir, "coordinate_cache.json") if target_dir else "coordinate_cache.json"
         
         clean_name = obj_name.lower().replace(" ", "").replace("_", "").replace("-", "")
-        
-        try:
-            from astropy.coordinates import SkyCoord
-            import astropy.units as u
-            c = SkyCoord(ra=ra_dec*u.degree, dec=dec_dec*u.degree)
-            c_str = f"RA: {c.ra.to_string(unit=u.hour, sep=' ', pad=True, precision=0)} | DEC: {c.dec.to_string(sep=' ', pad=True, alwayssign=True, precision=0)}"
-        except:
-            c_str = f"RA: {parts[0]} | DEC: {parts[1]}"
             
         cache = {}
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, "r", encoding="utf-8") as f: cache = json.load(f)
             except: pass
+            
         cache[clean_name] = {"ra": ra_dec, "dec": dec_dec, "coords_str": c_str}
+        
         try:
             with open(cache_path, "w", encoding="utf-8") as f: json.dump(cache, f, indent=4)
         except: pass
@@ -238,21 +296,28 @@ class AstroModuleBase(ctk.CTkFrame):
             try:
                 with open(notes_path, "r", encoding="utf-8") as f: notes = json.load(f)
             except: pass
+            
         target_key = obj_name
         for k in notes.keys():
             if k.lower().replace(" ", "").replace("_", "").replace("-", "") == clean_name:
                 target_key = k; break
                 
-        if target_key not in notes: notes[target_key] = {"todo": True, "note": f"Geplant aus dem AstroTracker.", "type": self.obj_type_name, "tags": []}
-        else: notes[target_key]["todo"] = True
+        # Hinweis im Text, dass die Koordinaten vorausberechnet wurden
+        calc_note = f" (Berechnet für {obs_time.strftime('%d.%m %H:%M')} UTC)" if self.obj_type_name != "Supernova" else ""
+        
+        if target_key not in notes: 
+            notes[target_key] = {"todo": True, "note": f"Geplant aus AstroTracker{calc_note}.", "type": self.obj_type_name, "tags": []}
+        else: 
+            notes[target_key]["todo"] = True
             
         try:
             with open(notes_path, "w", encoding="utf-8") as f: json.dump(notes, f, indent=4, ensure_ascii=False)
-            self.log(f"✅ '{obj_name}' erfolgreich zur Beobachtungsliste hinzugefügt!")
+            self.log(f"✅ '{obj_name}' erfolgreich zur Liste hinzugefügt!{calc_note}")
             app = self.winfo_toplevel()
             if hasattr(app, "frames") and "obslist" in app.frames:
                 app.frames["obslist"].refresh_ui()
-        except Exception as e: messagebox.showerror("Fehler", f"Fehler:\n{e}")
+        except Exception as e: 
+            messagebox.showerror("Fehler", f"Fehler:\n{e}")
 
     def show_automation_log(self, initial_text):
         if hasattr(self, 'log_win') and self.log_win.winfo_exists(): self.log_win.destroy()

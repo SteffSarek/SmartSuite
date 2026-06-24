@@ -40,13 +40,14 @@ def _df(filename):
 # DIALOGE & BASIS-KLASSE
 # ==============================================================================
 class TimeInputDialog(ctk.CTkToplevel):
-    def __init__(self, master, default_time=""):
+    # NEU: title_text und desc_text als Parameter!
+    def __init__(self, master, default_time="", title_text="Aufnahmezeitpunkt", desc_text="Bitte Zeitpunkt eingeben:"):
         super().__init__(master)
-        self.title("Aufnahmezeitpunkt (Lokalzeit)")
+        self.title(title_text)
         self.geometry("380x200")
         self.result = None
         self.attributes("-topmost", True)
-        ctk.CTkLabel(self, text="Bitte den geplanten Beobachtungszeitpunkt\n(LOKALE UHRZEIT) eingeben:", font=("Arial", 12, "bold")).pack(pady=(20, 5))
+        ctk.CTkLabel(self, text=desc_text, font=("Arial", 12, "bold")).pack(pady=(20, 5))
         ctk.CTkLabel(self, text="Format: YYYY-MM-DD HH:MM", text_color="gray").pack(pady=(0, 10))
         self.entry = ctk.CTkEntry(self, width=200, justify="center")
         self.entry.pack(pady=5)
@@ -210,7 +211,13 @@ class AstroModuleBase(ctk.CTkFrame):
         if self.obj_type_name == "Supernova":
             res = default_time 
         else:
-            res = TimeInputDialog(self, default_time=default_time).result
+            # Wir rufen den Dialog explizit mit "Lokalzeit" Texten auf!
+            res = TimeInputDialog(
+                self, 
+                default_time=default_time, 
+                title_text="Planung (Lokalzeit)", 
+                desc_text="Bitte geplanten Beobachtungszeitpunkt\n(LOKALE UHRZEIT) eingeben:"
+            ).result
             
         if not res: return 
         
@@ -253,7 +260,8 @@ class AstroModuleBase(ctk.CTkFrame):
                     
             if target_orb:
                 obs = observer.observe(target_orb)
-                ra, dec, _ = obs.astrometric().radec() # WICHTIG: Erzwingt J2000 Koordinaten!
+                # NEU: Exakte J2000 Projektion inkl. Lichtlaufzeit (Perfekt für Seestar & NINA)
+                ra, dec, _ = obs.apparent().radec(epoch=ts.J2000) 
                 ra_dec = ra.hours * 15.0 # In Grad umrechnen (1 Stunde = 15 Grad)
                 dec_dec = dec.degrees
                 
@@ -614,7 +622,13 @@ class CometTrackerModul(AstroModuleBase):
 
         ex_t = ext_time(fp)
         d_str = ex_t.strftime('%Y-%m-%d %H:%M') if ex_t else datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M')
-        res = TimeInputDialog(self, default_time=d_str).result
+        # Wir rufen den Dialog explizit mit "UTC" Texten auf!
+        res = TimeInputDialog(
+            self, 
+            default_time=d_str, 
+            title_text="Aufnahmezeitpunkt (UTC)", 
+            desc_text="Bitte Aufnahmezeitpunkt prüfen/eingeben\n(Zwingend in UTC!):"
+        ).result
         if not res: return
 
         try: o_time = datetime.datetime.strptime(res, "%Y-%m-%d %H:%M").replace(tzinfo=datetime.timezone.utc)
@@ -634,7 +648,8 @@ class CometTrackerModul(AstroModuleBase):
                     c_orb = mpc.comet_orbit(rows.iloc[0], ts, GM_SUN)
                     cfg = utils.load_config(); lat = float(cfg.get("default_lat", 51.16)); lon = float(cfg.get("default_lon", 10.45))
                     obs = (eph['earth'] + wgs84.latlon(lat, lon)).at(t_o).observe(eph['sun'] + c_orb)
-                    ra, dec, _ = obs.astrometric().radec(); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
+                    # NEU: Exakte J2000 Projektion für Aladin
+                    ra, dec, _ = obs.apparent().radec(epoch=ts.J2000); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
                     dd = int(abs_d); mm = int((abs_d - dd) * 60); ss = (abs_d - dd - mm/60) * 3600
                     target = f"{int(h):02d}:{int(m):02d}:{round(s,1):04.1f} {'+' if dec.degrees>=0 else '-'}{dd:02d}:{mm:02d}:{round(ss,1):04.1f}"
                     lbl = f"{name} ({o_time.strftime('%d.%m %H:%M')} UTC)"
@@ -913,7 +928,13 @@ class AsteroidTrackerModul(AstroModuleBase):
 
         ex_t = ext_time(fp)
         d_str = ex_t.strftime('%Y-%m-%d %H:%M') if ex_t else datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M')
-        res = TimeInputDialog(self, default_time=d_str).result
+        # Wir rufen den Dialog explizit mit "UTC" Texten auf!
+        res = TimeInputDialog(
+            self, 
+            default_time=d_str, 
+            title_text="Aufnahmezeitpunkt (UTC)", 
+            desc_text="Bitte Aufnahmezeitpunkt prüfen/eingeben\n(Zwingend in UTC!):"
+        ).result
         if not res: return
         try: o_time = datetime.datetime.strptime(res, "%Y-%m-%d %H:%M").replace(tzinfo=datetime.timezone.utc)
         except: return
@@ -932,7 +953,8 @@ class AsteroidTrackerModul(AstroModuleBase):
                     c_orb = mpc.mpcorb_orbit(rows.iloc[0], ts, GM_SUN)
                     cfg = utils.load_config(); lat = float(cfg.get("default_lat", 51.16)); lon = float(cfg.get("default_lon", 10.45))
                     obs = (eph['earth'] + wgs84.latlon(lat, lon)).at(t_o).observe(eph['sun'] + c_orb)
-                    ra, dec, _ = obs.astrometric().radec(); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
+                    # NEU: Exakte J2000 Projektion für Aladin
+                    ra, dec, _ = obs.apparent().radec(epoch=ts.J2000); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
                     dd = int(abs_d); mm = int((abs_d - dd) * 60); ss = (abs_d - dd - mm/60) * 3600
                     target = f"{int(h):02d}:{int(m):02d}:{round(s,1):04.1f} {'+' if dec.degrees>=0 else '-'}{dd:02d}:{mm:02d}:{round(ss,1):04.1f}"
                     lbl = f"{name} ({o_time.strftime('%d.%m %H:%M')} UTC)"

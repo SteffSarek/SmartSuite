@@ -353,10 +353,10 @@ class AstroCalendarFrame(ctk.CTkFrame):
                         
                 if not is_transit:
                     sun_culm_alt = observer.at(t_culm).observe(sun).apparent().altaz()[0].degrees
-                    if sun_culm_alt < -6:
+                    if sun_culm_alt < -12:
                         if iss.at(t_culm).is_sunlit(eph):
                             iss_culm_alt = (iss - topos).at(t_culm).altaz()[0].degrees
-                            if iss_culm_alt > 35:
+                            if iss_culm_alt > 45:
                                 dt_rise = dt_start.replace(tzinfo=pytz.utc).astimezone(local_tz)
                                 dt_culm = t_culm.utc_datetime().replace(tzinfo=pytz.utc).astimezone(local_tz)
                                 dt_set = t_end.utc_datetime().replace(tzinfo=pytz.utc).astimezone(local_tz)
@@ -885,41 +885,42 @@ class AstroCalendarFrame(ctk.CTkFrame):
 
             card = ctk.CTkFrame(self.scroll_frame, fg_color="#242424", border_width=1, border_color="#333333", corner_radius=8)
             card.pack(fill="x", padx=5, pady=4)
-            card.grid_columnconfigure(0, weight=0, minsize=60)  
-            card.grid_columnconfigure(1, weight=0, minsize=80)  
-            card.grid_columnconfigure(2, weight=1)              
-            card.grid_columnconfigure(3, weight=0, minsize=120) 
             
-            icon_container = ctk.CTkFrame(card, width=50, height=50, fg_color="transparent")
-            icon_container.grid(row=0, column=0, padx=(10, 5), pady=10)
-            icon_container.pack_propagate(False)
-            icon_lbl = ctk.CTkLabel(icon_container, text=ev["icon"], font=("Segoe UI Emoji", 28))
-            icon_lbl.place(relx=0.5, rely=0.5, anchor="center")
+            # Haupt-Container für das Kärtchen
+            card_content = ctk.CTkFrame(card, fg_color="transparent")
+            card_content.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            # 1. Icon (Ganz links)
+            icon_lbl = ctk.CTkLabel(card_content, text=ev["icon"], font=("Segoe UI Emoji", 32))
+            icon_lbl.pack(side="left", padx=(15, 10), pady=10)
             
             iso_date = ev["time"].strftime("%Y-%m-%d")
             disp_date = ev["time"].strftime("%d.%m.")
             time_str = ev["time"].strftime("%H:%M")
             
-            date_frame = ctk.CTkFrame(card, fg_color="transparent")
-            date_frame.grid(row=0, column=1, padx=(10, 5), pady=10, sticky="w")
-            ctk.CTkLabel(date_frame, text=disp_date, font=("Arial", 14, "bold"), text_color="#3498db").pack(anchor="w")
-            ctk.CTkLabel(date_frame, text=time_str, font=("Arial", 12), text_color="gray").pack(anchor="w")
+            # 2. Datum und Uhrzeit (Links)
+            date_frame = ctk.CTkFrame(card_content, fg_color="transparent", width=70)
+            date_frame.pack(side="left", padx=10)
+            ctk.CTkLabel(date_frame, text=disp_date, font=("Arial", 14, "bold"), text_color="#3498db").pack()
+            ctk.CTkLabel(date_frame, text=time_str, font=("Arial", 12), text_color="gray").pack()
             
-            info_frame = ctk.CTkFrame(card, fg_color="transparent")
-            info_frame.grid(row=0, column=2, padx=15, pady=10, sticky="ew")
+            # 3. Text & Beschreibung (Mitte, dehnt sich aus)
+            info_frame = ctk.CTkFrame(card_content, fg_color="transparent")
+            info_frame.pack(side="left", fill="x", expand=True, padx=15, pady=10)
             ctk.CTkLabel(info_frame, text=ev["title"], font=("Arial", 15, "bold"), anchor="w").pack(fill="x")
             ctk.CTkLabel(info_frame, text=ev["desc"], font=("Arial", 12), text_color="gray", anchor="w", justify="left").pack(fill="x")
             
+            # 4. Button (Ganz rechts)
             ev_key = f"{iso_date}_{ev['title']}"
             if ev_key in existing_keys:
-                btn_add = ctk.CTkButton(card, text="✔ Auf Liste", width=100, fg_color="#27ae60", state="disabled")
+                btn_add = ctk.CTkButton(card_content, text="✔ Auf Liste", width=100, fg_color="#27ae60", state="disabled")
             else:
-                btn_add = ctk.CTkButton(card, text="➕ Zur Liste", width=100, fg_color="#2980b9", hover_color="#3498db")
+                btn_add = ctk.CTkButton(card_content, text="➕ Zur Liste", width=100, fg_color="#2980b9", hover_color="#3498db")
                 def on_add(e_info=ev, b=btn_add, i_d=iso_date, d_d=disp_date, t_s=time_str):
                     module_obs_list.add_event(i_d, d_d, t_s, e_info["title"], e_info["desc"], e_info["icon"])
                     b.configure(text="✔ Auf Liste", fg_color="#27ae60", state="disabled")
                 btn_add.configure(command=on_add)
-            btn_add.grid(row=0, column=3, padx=15, pady=10, sticky="e")
+            btn_add.pack(side="right", padx=15, pady=10)
 
         self.btn_calc.configure(state="normal")
         self.is_calculating = False

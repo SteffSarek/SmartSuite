@@ -2,18 +2,6 @@
 # MODULE_OBS_LIST.PY - Beobachtungsliste (Vereint Kalender, Archiv & Wetter)
 # ==============================================================================
 import sys
-# --- ABSOLUTER FIX FÜR PYINSTALLER .EXE ABSTÜRZE ---
-if sys.stdout is None:
-    class DummyWriter:
-        def write(self, *args, **kwargs): pass
-        def flush(self): pass
-    sys.stdout = DummyWriter()
-if sys.stderr is None:
-    class DummyWriter:
-        def write(self, *args, **kwargs): pass
-        def flush(self): pass
-    sys.stderr = DummyWriter()
-
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
@@ -93,6 +81,46 @@ def remove_event(event_id, fallback_title=None, fallback_date=None):
     save_list(new_data)
 # --------------------------------------------------------------
 
+# --- NEU: Veraltete AstroTracker-Ziele (Kometen/Asteroiden) automatisch entfernen ---
+def _cleanup_expired_tracker_targets():
+    notes_path, cache_path, _ = get_list_paths()
+    if not os.path.exists(notes_path): return
+    
+    try:
+        with open(notes_path, "r", encoding="utf-8") as f: 
+            notes = json.load(f)
+            
+        changed = False
+        current_time_utc = datetime.now(pytz.utc)
+        local_tz = pytz.timezone('Europe/Berlin')
+        
+        for key, data in notes.items():
+            if not data.get("todo"): continue
+            
+            note_text = data.get("note", "")
+            # NEU: Suche nach dem String: (Berechnet für 14.06. 22:00 Lokalzeit)
+            match = re.search(r'\(Berechnet für (\d{2}\.\d{2}\. \d{2}:\d{2}) Lokalzeit\)', note_text)
+            if match:
+                time_str = match.group(1)
+                current_year = current_time_utc.year
+                try:
+                    # Datum einlesen
+                    target_time_naive = datetime.strptime(f"{time_str}.{current_year}", "%d.%m. %H:%M.%Y")
+                    # Dem System sagen: Das war ein deutsches Datum! Und dann in UTC umrechnen zum Vergleichen.
+                    target_time_utc = local_tz.localize(target_time_naive).astimezone(pytz.utc)
+                    
+                    # Wenn der berechnete Zeitpunkt 2 Stunden in der Vergangenheit liegt
+                    if current_time_utc > target_time_utc + timedelta(hours=2):
+                        data["todo"] = False
+                        changed = True
+                except: pass
+                
+        if changed:
+            with open(notes_path, "w", encoding="utf-8") as f: 
+                json.dump(notes, f, indent=4, ensure_ascii=False)
+    except: pass
+# -------------------------------------------------------------------------
+
 # --- NEU: ZENTRALE PFAD-VERWALTUNG ---
 def get_list_paths():
     cfg = utils.load_config()
@@ -105,6 +133,8 @@ def get_list_paths():
     return notes_path, cache_path, cat_path
 
 def load_aae_targets_rich():
+    _cleanup_expired_tracker_targets() # NEU: Bevor wir laden, fegen wir durch!
+    
     notes_path, cache_path, cat_path = get_list_paths()
     
     # NEU: Wenn die Datei gar nicht existiert, brechen wir ab und geben None zurück!
@@ -780,12 +810,17 @@ class ObsListFrame(ctk.CTkFrame):
                         if alt >= 20: current_score += (alt * 2) 
                         else: current_score -= ((20 - alt) * 5) 
                         current_score -= (scheduled_counts[t['name']] * 150)
+                        
+                        # --- NEU: Massiver Prioritäts-Bonus für berechnete AstroTracker Ziele ---
+                        # Diese Ziele sind auf eine exakte Zeit berechnet und müssen heute fotografiert werden!
+                        if "(Berechnet für" in t.get("note", ""):
+                            current_score += 1000
 
                         if current_score > best_score:
                             best_score = current_score
                             best_target = t
                             best_target['_temp_alt'] = alt
-                            best_target['_temp_az'] = az 
+                            best_target['_temp_az'] = az
 
                 if best_target:
                     plan.append({

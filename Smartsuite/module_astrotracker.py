@@ -42,11 +42,11 @@ def _df(filename):
 class TimeInputDialog(ctk.CTkToplevel):
     def __init__(self, master, default_time=""):
         super().__init__(master)
-        self.title("Aufnahmezeitpunkt (UTC)")
+        self.title("Aufnahmezeitpunkt (Lokalzeit)")
         self.geometry("380x200")
         self.result = None
         self.attributes("-topmost", True)
-        ctk.CTkLabel(self, text="Bitte den exakten Aufnahmezeitpunkt (UTC)\nfür die Positionsberechnung eingeben:", font=("Arial", 12, "bold")).pack(pady=(20, 5))
+        ctk.CTkLabel(self, text="Bitte den geplanten Beobachtungszeitpunkt\n(LOKALE UHRZEIT) eingeben:", font=("Arial", 12, "bold")).pack(pady=(20, 5))
         ctk.CTkLabel(self, text="Format: YYYY-MM-DD HH:MM", text_color="gray").pack(pady=(0, 10))
         self.entry = ctk.CTkEntry(self, width=200, justify="center")
         self.entry.pack(pady=5)
@@ -201,20 +201,26 @@ class AstroModuleBase(ctk.CTkFrame):
         row_values = self.tree.item(item, 'values')
         obj_name = str(row_values[0]).replace("🔗 ", "").strip()
         
-        # NEU: Wir fragen den Nutzer nach dem geplanten Beobachtungszeitpunkt
-        # Standardmäßig schlagen wir heute Abend 22:00 Uhr UTC vor
-        default_time = datetime.datetime.now(datetime.timezone.utc).replace(hour=22, minute=0, second=0).strftime('%Y-%m-%d %H:%M')
+        import pytz
+        local_tz = pytz.timezone('Europe/Berlin')
         
-        # Wenn es ein Supernova-Modul ist, fragen wir nicht nach der Zeit (SN bewegen sich nicht)
+        # Wir schlagen heute Abend 22:00 Uhr LOKALZEIT vor
+        default_time = datetime.datetime.now().replace(hour=22, minute=0, second=0).strftime('%Y-%m-%d %H:%M')
+        
         if self.obj_type_name == "Supernova":
             res = default_time 
         else:
             res = TimeInputDialog(self, default_time=default_time).result
             
-        if not res: return # Abbruch durch den Nutzer
+        if not res: return 
         
         try:
-            obs_time = datetime.datetime.strptime(res, "%Y-%m-%d %H:%M").replace(tzinfo=datetime.timezone.utc)
+            # 1. Wir lesen die Eingabe als lokales Datum (ohne Zeitzone)
+            naive_dt = datetime.datetime.strptime(res, "%Y-%m-%d %H:%M")
+            # 2. Wir machen es zu einem "echten" deutschen Datum (berücksichtigt Sommerzeit!)
+            local_dt = local_tz.localize(naive_dt)
+            # 3. Für Skyfield (die Mathematik) rechnen wir es hart in UTC um
+            obs_time_utc = local_dt.astimezone(datetime.timezone.utc)
         except:
             messagebox.showerror("Fehler", "Falsches Datums-/Zeitformat.")
             return
@@ -226,7 +232,7 @@ class AstroModuleBase(ctk.CTkFrame):
         
         try:
             ts = sky_loader.timescale()
-            t_o = ts.from_datetime(obs_time)
+            t_o = ts.from_datetime(obs_time_utc)  # HIER GEÄNDERT!
             eph = sky_loader('de421.bsp')
             cfg = utils.load_config()
             lat = float(cfg.get("default_lat", 51.16))
@@ -247,7 +253,7 @@ class AstroModuleBase(ctk.CTkFrame):
                     
             if target_orb:
                 obs = observer.observe(target_orb)
-                ra, dec, _ = obs.apparent().radec()
+                ra, dec, _ = obs.astrometric().radec() # WICHTIG: Erzwingt J2000 Koordinaten!
                 ra_dec = ra.hours * 15.0 # In Grad umrechnen (1 Stunde = 15 Grad)
                 dec_dec = dec.degrees
                 
@@ -302,8 +308,8 @@ class AstroModuleBase(ctk.CTkFrame):
             if k.lower().replace(" ", "").replace("_", "").replace("-", "") == clean_name:
                 target_key = k; break
                 
-        # Hinweis im Text, dass die Koordinaten vorausberechnet wurden
-        calc_note = f" (Berechnet für {obs_time.strftime('%d.%m %H:%M')} UTC)" if self.obj_type_name != "Supernova" else ""
+        # Hinweis im Text: Wir zeigen dem Nutzer die LOKALZEIT an!
+        calc_note = f" (Berechnet für {local_dt.strftime('%d.%m. %H:%M')} Lokalzeit)" if self.obj_type_name != "Supernova" else ""
         
         if target_key not in notes: 
             notes[target_key] = {"todo": True, "note": f"Geplant aus AstroTracker{calc_note}.", "type": self.obj_type_name, "tags": []}
@@ -628,7 +634,7 @@ class CometTrackerModul(AstroModuleBase):
                     c_orb = mpc.comet_orbit(rows.iloc[0], ts, GM_SUN)
                     cfg = utils.load_config(); lat = float(cfg.get("default_lat", 51.16)); lon = float(cfg.get("default_lon", 10.45))
                     obs = (eph['earth'] + wgs84.latlon(lat, lon)).at(t_o).observe(eph['sun'] + c_orb)
-                    ra, dec, _ = obs.apparent().radec(); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
+                    ra, dec, _ = obs.astrometric().radec(); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
                     dd = int(abs_d); mm = int((abs_d - dd) * 60); ss = (abs_d - dd - mm/60) * 3600
                     target = f"{int(h):02d}:{int(m):02d}:{round(s,1):04.1f} {'+' if dec.degrees>=0 else '-'}{dd:02d}:{mm:02d}:{round(ss,1):04.1f}"
                     lbl = f"{name} ({o_time.strftime('%d.%m %H:%M')} UTC)"
@@ -926,7 +932,7 @@ class AsteroidTrackerModul(AstroModuleBase):
                     c_orb = mpc.mpcorb_orbit(rows.iloc[0], ts, GM_SUN)
                     cfg = utils.load_config(); lat = float(cfg.get("default_lat", 51.16)); lon = float(cfg.get("default_lon", 10.45))
                     obs = (eph['earth'] + wgs84.latlon(lat, lon)).at(t_o).observe(eph['sun'] + c_orb)
-                    ra, dec, _ = obs.apparent().radec(); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
+                    ra, dec, _ = obs.astrometric().radec(); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
                     dd = int(abs_d); mm = int((abs_d - dd) * 60); ss = (abs_d - dd - mm/60) * 3600
                     target = f"{int(h):02d}:{int(m):02d}:{round(s,1):04.1f} {'+' if dec.degrees>=0 else '-'}{dd:02d}:{mm:02d}:{round(ss,1):04.1f}"
                     lbl = f"{name} ({o_time.strftime('%d.%m %H:%M')} UTC)"

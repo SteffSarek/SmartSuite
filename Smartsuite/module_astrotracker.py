@@ -260,9 +260,9 @@ class AstroModuleBase(ctk.CTkFrame):
                     
             if target_orb:
                 obs = observer.observe(target_orb)
-                # NEU: Exakte J2000 Projektion inkl. Lichtlaufzeit (Perfekt für Seestar & NINA)
-                ra, dec, _ = obs.apparent().radec(epoch=ts.J2000) 
-                ra_dec = ra.hours * 15.0 # In Grad umrechnen (1 Stunde = 15 Grad)
+                # .observe() ist von Haus aus bereits astrometrisch (J2000)!
+                ra, dec, _ = obs.radec() 
+                ra_dec = ra.hours * 15.0
                 dec_dec = dec.degrees
                 
                 h, m, s = ra.hms()
@@ -323,6 +323,8 @@ class AstroModuleBase(ctk.CTkFrame):
             notes[target_key] = {"todo": True, "note": f"Geplant aus AstroTracker{calc_note}.", "type": self.obj_type_name, "tags": []}
         else: 
             notes[target_key]["todo"] = True
+            # BUGFIX: Überschreibe die alte Notiz zwingend mit der neu berechneten Zeit!
+            notes[target_key]["note"] = f"Geplant aus AstroTracker{calc_note}."
             
         try:
             with open(notes_path, "w", encoding="utf-8") as f: json.dump(notes, f, indent=4, ensure_ascii=False)
@@ -648,8 +650,7 @@ class CometTrackerModul(AstroModuleBase):
                     c_orb = mpc.comet_orbit(rows.iloc[0], ts, GM_SUN)
                     cfg = utils.load_config(); lat = float(cfg.get("default_lat", 51.16)); lon = float(cfg.get("default_lon", 10.45))
                     obs = (eph['earth'] + wgs84.latlon(lat, lon)).at(t_o).observe(eph['sun'] + c_orb)
-                    # NEU: Exakte J2000 Projektion für Aladin
-                    ra, dec, _ = obs.apparent().radec(epoch=ts.J2000); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
+                    ra, dec, _ = obs.radec(); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
                     dd = int(abs_d); mm = int((abs_d - dd) * 60); ss = (abs_d - dd - mm/60) * 3600
                     target = f"{int(h):02d}:{int(m):02d}:{round(s,1):04.1f} {'+' if dec.degrees>=0 else '-'}{dd:02d}:{mm:02d}:{round(ss,1):04.1f}"
                     lbl = f"{name} ({o_time.strftime('%d.%m %H:%M')} UTC)"
@@ -783,6 +784,15 @@ class AsteroidTrackerModul(AstroModuleBase):
                     self.log("WARNUNG: 'bright_asteroids.txt' fehlt! Bitte in den Einstellungen updaten.")
                     self.after(0, lambda: self.refresh_btn.configure(state="normal"))
                     return
+            
+            # Wir stellen sicher, dass 'designation' existiert, ohne echte Namen zu zerstören
+            if 'designation' not in df.columns:
+                # Falls die Bezeichnung ausnahmsweise im Index liegt, holen wir sie dort raus
+                df['designation'] = df.index
+            else:
+                # WICHTIG für Skyfield: Wir setzen den Index auf die Namen, 
+                # damit die Suche später beim Export nicht abstürzt!
+                df = df.set_index('designation', drop=False)
             
             if is_hl or "Klassiker" in choice:
                 if 'magnitude_H' in df.columns: df = df[df['magnitude_H'] <= 11.5]
@@ -953,8 +963,7 @@ class AsteroidTrackerModul(AstroModuleBase):
                     c_orb = mpc.mpcorb_orbit(rows.iloc[0], ts, GM_SUN)
                     cfg = utils.load_config(); lat = float(cfg.get("default_lat", 51.16)); lon = float(cfg.get("default_lon", 10.45))
                     obs = (eph['earth'] + wgs84.latlon(lat, lon)).at(t_o).observe(eph['sun'] + c_orb)
-                    # NEU: Exakte J2000 Projektion für Aladin
-                    ra, dec, _ = obs.apparent().radec(epoch=ts.J2000); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
+                    ra, dec, _ = obs.radec(); h, m, s = ra.hms(); abs_d = abs(dec.degrees)
                     dd = int(abs_d); mm = int((abs_d - dd) * 60); ss = (abs_d - dd - mm/60) * 3600
                     target = f"{int(h):02d}:{int(m):02d}:{round(s,1):04.1f} {'+' if dec.degrees>=0 else '-'}{dd:02d}:{mm:02d}:{round(ss,1):04.1f}"
                     lbl = f"{name} ({o_time.strftime('%d.%m %H:%M')} UTC)"

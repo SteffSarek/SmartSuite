@@ -809,12 +809,19 @@ class ObsListFrame(ctk.CTkFrame):
                         current_score = t.get('score', 0)
                         if alt >= 20: current_score += (alt * 2) 
                         else: current_score -= ((20 - alt) * 5) 
-                        current_score -= (scheduled_counts[t['name']] * 150)
                         
-                        # --- NEU: Massiver Prioritäts-Bonus für berechnete AstroTracker Ziele ---
-                        # Diese Ziele sind auf eine exakte Zeit berechnet und müssen heute fotografiert werden!
-                        if "(Berechnet für" in t.get("note", ""):
+                        # Ist es ein zeitkritisches Ziel vom AstroTracker?
+                        is_tracker_target = "(Berechnet für" in t.get("note", "")
+                        
+                        if is_tracker_target:
+                            # 1000 Punkte Bonus für den ersten Durchlauf
                             current_score += 1000
+                            # Aber MASSIVE Strafe (-2000), sobald es seinen Slot hatte!
+                            # So geben wir dem Rest der Beobachtungsliste auch eine Chance.
+                            current_score -= (scheduled_counts[t['name']] * 2000)
+                        else:
+                            # Normale Strafe für Deep-Sky-Objekte
+                            current_score -= (scheduled_counts[t['name']] * 150)
 
                         if current_score > best_score:
                             best_score = current_score

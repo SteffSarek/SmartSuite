@@ -3,4 +3,4 @@
 # ==============================================================================
 
 # Ändere diese Zahl für ein neues Release (z.B. "1.1")
-CURRENT_VERSION = "1.0.3"
+CURRENT_VERSION = "1.1.0"

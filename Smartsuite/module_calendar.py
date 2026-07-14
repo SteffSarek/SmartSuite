@@ -69,9 +69,16 @@ class AstroCalendarFrame(ctk.CTkFrame):
         self.btn_calc = ctk.CTkButton(top_frame, text="🔄 Aktualisieren", command=lambda: self._trigger_load(force=True), fg_color="#2980b9", hover_color="#3498db", width=130)
         self.btn_calc.pack(side="right", padx=10)
         
-        # --- HIER IST DER TERMINAL-BUTTON WIEDER ---
         self.btn_log = ctk.CTkButton(top_frame, text="🐞 Terminal", command=self.open_debug_log, fg_color="#34495e", hover_color="#2c3e50", width=100)
         self.btn_log.pack(side="right", padx=10)
+        
+        # --- NEU: ISS FILTER CHECKBOX ---
+        self.show_iss_var = tk.BooleanVar(value=False) # Standardmäßig aus!
+        self.chk_iss = ctk.CTkCheckBox(top_frame, text="Normale ISS-Überflüge zeigen", variable=self.show_iss_var)
+        self.chk_iss.pack(side="right", padx=20)
+        
+        # Sofortiges UI Update ohne Neuberechnung, wenn der Haken geklickt wird
+        self.show_iss_var.trace_add("write", lambda *args: self.render_calendar(self._calc_result) if self._calc_result else None)
         
         info_frame = ctk.CTkFrame(self, fg_color="transparent")
         info_frame.pack(fill="x", padx=20, pady=0)
@@ -123,7 +130,8 @@ class AstroCalendarFrame(ctk.CTkFrame):
         cfg = utils.load_config()
         lat = cfg.get("default_lat", "51.16")
         lon = cfg.get("default_lon", "10.45")
-        self.lbl_location.configure(text=f"Aktueller Standort: Lat {lat}° / Lon {lon}°")
+        ele = cfg.get("default_elevation", "0")
+        self.lbl_location.configure(text=f"Aktueller Standort: Lat {lat}° / Lon {lon}° / Höhe: {ele}m")
 
     def refresh_ui(self):
         if not self.is_calculating:
@@ -237,8 +245,22 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     else: 
                         if diff_deg < -90: lines.append(f"— {name} dominiert den Morgenhimmel und die zweite Nachthälfte.")
                         else: lines.append(f"— {name} taucht in der Morgendämmerung wieder auf ({const_name}).")
-        return "\n".join(lines)
+        # --- NEU: Meteorschauer in den Monats-Tipps ---
+        meteor_highlights = {
+            1: "— 🌠 Anfang des Monats bringen die Quadrantiden ihr kurzes, aber oft kräftiges Maximum.",
+            4: "— 🌠 Ende April sind die Lyriden aktiv (Sternbild Leier).",
+            5: "— 🌠 Die Eta-Aquariiden flitzen in der ersten Monatshälfte über den Himmel.",
+            7: "— 🌠 Ende Juli erreichen die Südlichen Delta-Aquariiden ihr Maximum.",
+            8: "— 🌠 Das absolute Sommer-Highlight: Die Perseiden erreichen um den 12. August ihr Maximum!",
+            10: "— 🌠 Im Oktober sind die Draconiden und später die Orioniden (Halley-Staub) aktiv.",
+            11: "— 🌠 Mitte November rasen die extrem schnellen Leoniden aus dem Sternbild Löwe über den Himmel.",
+            12: "— 🌠 Im Dezember dominieren die Geminiden – der oft stärkste und verlässlichste Meteorschauer des Jahres."
+        }
+        if month in meteor_highlights:
+            lines.append(meteor_highlights[month])
 
+        return "\n".join(lines)
+        
     # ==========================================
     # BERECHNUNG: ISS TRANSITE UND ÜBERFLÜGE
     # ==========================================
@@ -246,6 +268,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
         cfg = utils.load_config()
         lat = float(cfg.get("default_lat", "51.16"))
         lon = float(cfg.get("default_lon", "10.45"))
+        elevation = float(cfg.get("default_elevation", "0")) # <--- NEU
         local_tz = pytz.timezone('Europe/Berlin')
         events = []
         
@@ -259,7 +282,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
             eph = sky_loader('de421.bsp')
             sun, moon, earth = eph['sun'], eph['moon'], eph['earth']
             
-            topos = wgs84.latlon(lat, lon)
+            topos = wgs84.latlon(lat, lon, elevation_m=elevation)
             observer = earth + topos
             
             print("Lade aktuelle ISS Stationsdaten...")
@@ -293,62 +316,79 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 sec = int((dt_end - dt_start).total_seconds())
                 if sec <= 0: continue
                 
+                # Grobes 1-Sekunden-Raster für den gesamten Überflug
+                t_arr_sec = dt_start.second + np.arange(sec)
                 t_arr = ts.utc(dt_start.year, dt_start.month, dt_start.day, 
-                               dt_start.hour, dt_start.minute, 
-                               dt_start.second + np.arange(sec))
+                               dt_start.hour, dt_start.minute, t_arr_sec)
                                
                 iss_topo = (iss - topos).at(t_arr)
                 ra_iss, dec_iss, _ = iss_topo.radec()
-                iss_alt_arr = iss_topo.altaz()[0].degrees
                 
                 sun_app = observer.at(t_arr).observe(sun).apparent()
                 ra_sun, dec_sun, _ = sun_app.radec()
-                sun_alt_arr = sun_app.altaz()[0].degrees
                 
                 moon_app = observer.at(t_arr).observe(moon).apparent()
                 ra_moon, dec_moon, _ = moon_app.radec()
-                moon_alt_arr = moon_app.altaz()[0].degrees
                 
-                r_iss = ra_iss.radians; d_iss = dec_iss.radians
-                r_sun = ra_sun.radians; d_sun = dec_sun.radians
-                r_moon = ra_moon.radians; d_moon = dec_moon.radians
-                
-                cos_sun = np.sin(d_iss)*np.sin(d_sun) + np.cos(d_iss)*np.cos(d_sun)*np.cos(r_iss - r_sun)
+                # Vektormathematik für Winkelabstand (grob)
+                cos_sun = np.sin(dec_iss.radians)*np.sin(dec_sun.radians) + np.cos(dec_iss.radians)*np.cos(dec_sun.radians)*np.cos(ra_iss.radians - ra_sun.radians)
                 sep_sun = np.degrees(np.arccos(np.clip(cos_sun, -1.0, 1.0)))
-                cos_moon = np.sin(d_iss)*np.sin(d_moon) + np.cos(d_iss)*np.cos(d_moon)*np.cos(r_iss - r_moon)
+                
+                cos_moon = np.sin(dec_iss.radians)*np.sin(dec_moon.radians) + np.cos(dec_iss.radians)*np.cos(dec_moon.radians)*np.cos(ra_iss.radians - ra_moon.radians)
                 sep_moon = np.degrees(np.arccos(np.clip(cos_moon, -1.0, 1.0)))
                 
-                min_sun_sep = np.min(sep_sun)
-                min_moon_sep = np.min(sep_moon)
+                min_sun_sep_rough = np.min(sep_sun)
+                min_moon_sep_rough = np.min(sep_moon)
                 
-                # --- STRENGERER TRANSIT-FILTER ---
                 is_transit = False
-                # Max 1.5 Grad Abweichung für einen "nahen" Vorbeiflug (Sonne)
-                if min_sun_sep < 1.5:
-                    idx = np.argmin(sep_sun)
-                    if sun_alt_arr[idx] > 5:
-                        t_transit = t_arr[idx]; alt = iss_alt_arr[idx]
+                
+                # --- VERBESSERTE TRANSIT-BERECHNUNG (Micro-Search) ---
+                # Wenn wir im 1-Sekunden Raster näher als 1.5 Grad herankommen, 
+                # zoomen wir zeitlich extrem rein (0.05 Sekunden Schritte)!
+                def check_precise_transit(target_body, t_array, rough_sep_array, is_sun=True):
+                    idx_min = np.argmin(rough_sep_array)
+                    # Wir nehmen +- 2 Sekunden um den gröbsten Minimalpunkt
+                    t_fine_sec = t_arr_sec[idx_min] + np.arange(-2.0, 2.0, 0.05)
+                    t_fine = ts.utc(dt_start.year, dt_start.month, dt_start.day, dt_start.hour, dt_start.minute, t_fine_sec)
+                    
+                    iss_fine = (iss - topos).at(t_fine)
+                    r_i, d_i, _ = iss_fine.radec()
+                    
+                    targ_app = observer.at(t_fine).observe(target_body).apparent()
+                    r_t, d_t, _ = targ_app.radec()
+                    targ_alt = targ_app.altaz()[0].degrees
+                    
+                    cos_fine = np.sin(d_i.radians)*np.sin(d_t.radians) + np.cos(d_i.radians)*np.cos(d_t.radians)*np.cos(r_i.radians - r_t.radians)
+                    sep_fine = np.degrees(np.arccos(np.clip(cos_fine, -1.0, 1.0)))
+                    
+                    best_idx = np.argmin(sep_fine)
+                    return sep_fine[best_idx], t_fine[best_idx], targ_alt[best_idx], sep_fine
+
+                # --- SONNE ---
+                if min_sun_sep_rough < 1.5:
+                    min_sep, t_transit, alt, sep_array = check_precise_transit(sun, t_arr, sep_sun, True)
+                    if alt > 5:
                         dt_local = t_transit.utc_datetime().replace(tzinfo=pytz.utc).astimezone(local_tz)
-                        if min_sun_sep < 0.28:
-                            duration = round(len(np.where(sep_sun < 0.28)[0]) * 1.0, 1)
-                            events.append({"time": dt_local, "icon": "☀️", "title": "ISS Transit vor der Sonne!", "desc": f"Direkter Treffer! Dauer: {duration} Sekunden. Höhe: {int(alt)}°."})
+                        # Radius der Sonne ist ca. 0.266 Grad. 
+                        if min_sep <= 0.266:
+                            duration = round(len(np.where(sep_array <= 0.266)[0]) * 0.05, 2)
+                            events.append({"time": dt_local, "icon": "☀️", "title": "ISS Transit vor der Sonne!", "desc": f"Direkter Treffer! Dauer: {duration} Sekunden.\nMinimaler Abstand zum Zentrum: {round(min_sep, 3)}°.\nHöhe am Himmel: {int(alt)}°."})
                         else:
-                            dist_km = round(min_sun_sep * 11.5)
-                            events.append({"time": dt_local, "icon": "☀️", "title": "Naher Sonnen-Transit", "desc": f"ISS verfehlt das Zentrum um {round(min_sun_sep, 1)}° (ca. {dist_km} km entfernt). Höhe: {int(alt)}°."})
+                            dist_km = round(min_sep * 11.5)
+                            events.append({"time": dt_local, "icon": "☀️", "title": "Naher Sonnen-Transit (Close Pass)", "desc": f"ISS verfehlt das Zentrum um {round(min_sep, 2)}° (ca. {dist_km} km von der Zentrallinie entfernt). Höhe: {int(alt)}°."})
                         is_transit = True
-                        
-                # Max 1.5 Grad Abweichung für einen "nahen" Vorbeiflug (Mond)
-                if not is_transit and min_moon_sep < 1.5:
-                    idx = np.argmin(sep_moon)
-                    if moon_alt_arr[idx] > 5:
-                        t_transit = t_arr[idx]; alt = iss_alt_arr[idx]
+
+                # --- MOND ---
+                if not is_transit and min_moon_sep_rough < 1.5:
+                    min_sep, t_transit, alt, sep_array = check_precise_transit(moon, t_arr, sep_moon, False)
+                    if alt > 5:
                         dt_local = t_transit.utc_datetime().replace(tzinfo=pytz.utc).astimezone(local_tz)
-                        if min_moon_sep < 0.28:
-                            duration = round(len(np.where(sep_moon < 0.28)[0]) * 1.0, 1)
-                            events.append({"time": dt_local, "icon": "🌕", "title": "ISS Transit vor dem Mond!", "desc": f"Direkter Treffer! Dauer: {duration} Sekunden. Höhe: {int(alt)}°."})
+                        if min_sep <= 0.266:
+                            duration = round(len(np.where(sep_array <= 0.266)[0]) * 0.05, 2)
+                            events.append({"time": dt_local, "icon": "🌕", "title": "ISS Transit vor dem Mond!", "desc": f"Direkter Treffer! Dauer: {duration} Sekunden.\nMinimaler Abstand zum Zentrum: {round(min_sep, 3)}°.\nHöhe am Himmel: {int(alt)}°."})
                         else:
-                            dist_km = round(min_moon_sep * 11.5)
-                            events.append({"time": dt_local, "icon": "🌕", "title": "Naher Mond-Transit", "desc": f"ISS verfehlt das Zentrum um {round(min_moon_sep, 1)}° (ca. {dist_km} km entfernt). Höhe: {int(alt)}°."})
+                            dist_km = round(min_sep * 11.5)
+                            events.append({"time": dt_local, "icon": "🌕", "title": "Naher Mond-Transit (Close Pass)", "desc": f"ISS verfehlt das Zentrum um {round(min_sep, 2)}° (ca. {dist_km} km von der Zentrallinie entfernt). Höhe: {int(alt)}°."})
                         is_transit = True
                         
                 if not is_transit:
@@ -439,7 +479,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
         observer = ephem.Observer()
         observer.lat = lat_str
         observer.lon = lon_str
-        observer.elevation = 150
+        observer.elevation = float(cfg.get("default_elevation", "0"))
         moon = ephem.Moon()
         sun = ephem.Sun()
         
@@ -816,14 +856,17 @@ class AstroCalendarFrame(ctk.CTkFrame):
             if not parade_found: curr += 1
 
         # --- 5. METEORSCHAUER ---
-        # Daten: (Name, Monat, Tag, ZHR, Sternbild, RA des Radianten, Dec des Radianten, Beschreibung)
         meteor_showers = [
             ("Quadrantiden", 1, 3, 120, "Bärenhüter", "15:20", "49:00", "Kurzes Maximum, aber potenziell sehr stark."),
             ("Lyriden", 4, 22, 18, "Leier", "18:04", "34:00", "Mittlere Stärke, manchmal helle Feuerkugeln."),
+            ("Eta-Aquariiden", 5, 6, 50, "Wassermann", "22:32", "-01:00", "Staub des Halleyschen Kometen. Besser für südliche Breiten, aber sichtbar."),
+            ("Südliche Delta-Aquariiden", 7, 30, 25, "Wassermann", "22:40", "-16:00", "Häufig schwache, aber konstante Meteore. Gute Vorboten der Perseiden."),
             ("Perseiden", 8, 12, 100, "Perseus", "03:04", "58:00", "Der bekannteste Schauer! Schnelle, helle Meteore."),
+            ("Draconiden", 10, 8, 10, "Drache", "17:28", "54:00", "Meist schwach, aber in manchen Jahren plötzliche, extreme Ausbrüche (Meteorforscher-Tipp!)."),
             ("Orioniden", 10, 21, 20, "Orion", "06:20", "16:00", "Hervorgerufen durch den Halleyschen Kometen."),
-            ("Leoniden", 11, 17, 15, "Löwe", "10:08", "22:00", "Schnelle Meteore, historisch für Stürme bekannt."),
-            ("Geminiden", 12, 14, 150, "Zwillinge", "07:28", "33:00", "Der verlässlichste Schauer des Jahres!")
+            ("Leoniden", 11, 17, 15, "Löwe", "10:08", "22:00", "Schnelle Meteore, historisch für Jahrhundert-Stürme bekannt."),
+            ("Geminiden", 12, 14, 150, "Zwillinge", "07:28", "33:00", "Der verlässlichste Schauer des Jahres! Oft bunt und langsam."),
+            ("Ursiden", 12, 22, 10, "Kleiner Bär", "14:28", "76:00", "Zirkumpolarer Radiant, direkt vor Weihnachten.")
         ]
         
         for name, m, d, zhr, const_name, ra_str, dec_str, desc in meteor_showers:
@@ -859,12 +902,27 @@ class AstroCalendarFrame(ctk.CTkFrame):
         real_current_month = datetime.now().month
         target_scroll_widget = None
         
-        if not events: ctk.CTkLabel(self.scroll_frame, text="Keine Ereignisse gefunden.", text_color="gray").pack(pady=50)
+        if not events: 
+            ctk.CTkLabel(self.scroll_frame, text="Keine Ereignisse gefunden.", text_color="gray").pack(pady=50)
+            return
             
         existing_list = module_obs_list.load_list()
         existing_keys = [f"{x['iso_date']}_{x['title']}" for x in existing_list]
         
+        # --- NEU: ISS FILTER ANWENDEN ---
+        filtered_events = []
         for ev in events:
+            # Wenn der Titel "Heller ISS Überflug" ist und die Checkbox AUS ist, überspringen wir das Event.
+            # Transits (Sonne/Mond) haben andere Titel und bleiben immer sichtbar!
+            if ev["title"] == "Heller ISS Überflug" and not self.show_iss_var.get():
+                continue
+            filtered_events.append(ev)
+            
+        if not filtered_events:
+            ctk.CTkLabel(self.scroll_frame, text="Keine Ereignisse (oder alle durch Filter ausgeblendet).", text_color="gray").pack(pady=50)
+            return
+        
+        for ev in filtered_events:
             if ev["time"].month != current_month:
                 current_month = ev["time"].month
                 year = ev["time"].year
@@ -886,11 +944,9 @@ class AstroCalendarFrame(ctk.CTkFrame):
             card = ctk.CTkFrame(self.scroll_frame, fg_color="#242424", border_width=1, border_color="#333333", corner_radius=8)
             card.pack(fill="x", padx=5, pady=4)
             
-            # Haupt-Container für das Kärtchen
             card_content = ctk.CTkFrame(card, fg_color="transparent")
             card_content.pack(fill="both", expand=True, padx=5, pady=5)
             
-            # 1. Icon (Ganz links)
             icon_lbl = ctk.CTkLabel(card_content, text=ev["icon"], font=("Segoe UI Emoji", 32))
             icon_lbl.pack(side="left", padx=(15, 10), pady=10)
             
@@ -898,19 +954,16 @@ class AstroCalendarFrame(ctk.CTkFrame):
             disp_date = ev["time"].strftime("%d.%m.")
             time_str = ev["time"].strftime("%H:%M")
             
-            # 2. Datum und Uhrzeit (Links)
             date_frame = ctk.CTkFrame(card_content, fg_color="transparent", width=70)
             date_frame.pack(side="left", padx=10)
             ctk.CTkLabel(date_frame, text=disp_date, font=("Arial", 14, "bold"), text_color="#3498db").pack()
             ctk.CTkLabel(date_frame, text=time_str, font=("Arial", 12), text_color="gray").pack()
             
-            # 3. Text & Beschreibung (Mitte, dehnt sich aus)
             info_frame = ctk.CTkFrame(card_content, fg_color="transparent")
             info_frame.pack(side="left", fill="x", expand=True, padx=15, pady=10)
             ctk.CTkLabel(info_frame, text=ev["title"], font=("Arial", 15, "bold"), anchor="w").pack(fill="x")
             ctk.CTkLabel(info_frame, text=ev["desc"], font=("Arial", 12), text_color="gray", anchor="w", justify="left").pack(fill="x")
             
-            # 4. Button (Ganz rechts)
             ev_key = f"{iso_date}_{ev['title']}"
             if ev_key in existing_keys:
                 btn_add = ctk.CTkButton(card_content, text="✔ Auf Liste", width=100, fg_color="#27ae60", state="disabled")

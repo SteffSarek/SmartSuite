@@ -212,16 +212,13 @@ class SettingsWindow(ctk.CTkToplevel):
         
         self.def_lat = tk.StringVar(value=c.get("default_lat", "51.16")) 
         self.def_lon = tk.StringVar(value=c.get("default_lon", "10.45"))
+        self.def_ele = tk.StringVar(value=str(c.get("default_elevation", "0"))) # <--- NEU
         self.session_gap = tk.StringVar(value=str(c.get("session_gap", "5")))
         
-        self.path_siril.trace_add("write", lambda *a: utils.save_config("custom_siril_path", self.path_siril.get()))
-        self.path_scripts.trace_add("write", lambda *a: utils.save_config("custom_scripts_path", self.path_scripts.get()))
-        self.path_astap.trace_add("write", lambda *a: utils.save_config("astap_path", self.path_astap.get()))
-        self.path_aladin.trace_add("write", lambda *a: utils.save_config("aladin_path", self.path_aladin.get()))
-        self.path_export.trace_add("write", lambda *a: utils.save_config("export_path", self.path_export.get())) # <--- NEU
-
+        # ... (bestehende traces) ...
         self.def_lat.trace_add("write", lambda *a: utils.save_config("default_lat", self.def_lat.get()))
         self.def_lon.trace_add("write", lambda *a: utils.save_config("default_lon", self.def_lon.get()))
+        self.def_ele.trace_add("write", lambda *a: utils.save_config("default_elevation", self.def_ele.get())) # <--- NEU
 
         self.build_ui()
 
@@ -258,11 +255,13 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkEntry(s_row, textvariable=self.session_gap, width=60).pack(side="left", padx=5)
 
         row = ctk.CTkFrame(gf, fg_color="transparent"); row.pack(pady=5)
-        ctk.CTkLabel(row, text="Breitengrad (Lat):").pack(side="left", padx=5)
-        ctk.CTkEntry(row, textvariable=self.def_lat, width=100).pack(side="left", padx=5)
-        ctk.CTkLabel(row, text="Längengrad (Lon):").pack(side="left", padx=5)
-        ctk.CTkEntry(row, textvariable=self.def_lon, width=100).pack(side="left", padx=5)
-        ctk.CTkLabel(gf, text="Beispiel: Berlin = 52.52 / 13.40 (Dezimal)", text_color="gray", font=("Arial", 10)).pack(pady=2)
+        ctk.CTkLabel(row, text="Lat:").pack(side="left", padx=2)
+        ctk.CTkEntry(row, textvariable=self.def_lat, width=70).pack(side="left", padx=2)
+        ctk.CTkLabel(row, text="Lon:").pack(side="left", padx=2)
+        ctk.CTkEntry(row, textvariable=self.def_lon, width=70).pack(side="left", padx=2)
+        ctk.CTkLabel(row, text="Höhe (m):").pack(side="left", padx=2)
+        ctk.CTkEntry(row, textvariable=self.def_ele, width=50).pack(side="left", padx=2)
+        ctk.CTkLabel(gf, text="Bsp: Berlin = 52.52 / 13.40 / 34m (Höhe ü.N.N)", text_color="gray", font=("Arial", 10)).pack(pady=2)
 
         # --- NEU: DATENBANK WARTUNG (ASTROTRACKER) ---
         db_frame = ctk.CTkFrame(self)
@@ -422,6 +421,39 @@ class SubfolderActionDialog(ctk.CTkToplevel):
     def do_mosaic(self):
         self.withdraw()
         self.after(50, lambda: self.callback("mosaic"))
+        self.after(100, self.destroy)
+
+# --- FENSTER FÜR SMART TELESKOPE (1-Klick oder Auswahl) ---
+class SmartDeviceActionDialog(ctk.CTkToplevel):
+    def __init__(self, parent, device_name, start_path, callback_all, callback_select):
+        super().__init__(parent)
+        self.title(f"{device_name} erkannt")
+        self.geometry("450x230")
+        self.callback_all = callback_all
+        self.callback_select = callback_select
+        
+        apply_safe_focus(self)
+
+        ctk.CTkLabel(self, text=f"Laufwerk: {device_name}", font=("Arial", 16, "bold"), text_color="#3498db").pack(pady=(20, 10))
+        ctk.CTkLabel(self, text="Wie möchtest du importieren?", text_color="gray").pack(pady=(0, 20))
+        
+        f = ctk.CTkFrame(self, fg_color="transparent")
+        f.pack(fill="both", expand=True, padx=20)
+        
+        btn_all = ctk.CTkButton(f, text="📥 ALLES importieren\n(1-Klick Automatik)", height=60, command=self.do_all, fg_color="#27ae60", hover_color="#2ecc71")
+        btn_all.pack(side="left", expand=True, padx=5, fill="x")
+        
+        btn_sel = ctk.CTkButton(f, text="📁 ORDNER auswählen\n(Nur bestimmte Astro-Ziele)", height=60, command=self.do_select, fg_color="#2980b9", hover_color="#3498db")
+        btn_sel.pack(side="right", expand=True, padx=5, fill="x")
+
+    def do_all(self):
+        self.withdraw()
+        self.after(50, self.callback_all)
+        self.after(100, self.destroy)
+
+    def do_select(self):
+        self.withdraw()
+        self.after(50, self.callback_select)
         self.after(100, self.destroy)
 
 # --- HAUPTANWENDUNG ---
@@ -672,21 +704,26 @@ class SmartSuiteApp(ctk.CTk):
             return
 
         # =========================================================
-        # NEU: SMART TELESCOPE FAST-LANE (BYPASS FÜR DIALOG)
+        # NEU: SMART TELESKOPE ERKENNUNG FÜR DEN DIALOG
         # =========================================================
-        # Wenn es sich um ein Seestar oder Dwarf Laufwerk/Ordner handelt, 
-        # überspringen wir die lästige "Mosaik oder Batch"-Abfrage komplett!
-        # Der Import-Worker regelt das ab sofort vollautomatisch.
         d_lower = d.lower()
-        is_smart_telescope = False
+        device_name = None
+        target_dir_for_select = None
         
         if d_lower.endswith("myworks") or os.path.exists(os.path.join(d, "MyWorks")):
-            is_smart_telescope = True
+            device_name = "Seestar"
+            target_dir_for_select = os.path.join(d, "MyWorks") if os.path.exists(os.path.join(d, "MyWorks")) else d
         elif d_lower.endswith("astronomy") or os.path.exists(os.path.join(d, "Astronomy")):
-            is_smart_telescope = True
-            
-        if is_smart_telescope:
-            set_path_val([d])
+            device_name = "Dwarflab"
+            target_dir_for_select = os.path.join(d, "Astronomy") if os.path.exists(os.path.join(d, "Astronomy")) else d
+
+        if device_name:
+            def on_all():
+                set_path_val([d])
+            def on_select():
+                FolderSelectDialog(self, target_dir_for_select, set_path_val)
+                
+            SmartDeviceActionDialog(self, device_name, d, on_all, on_select)
             return
         # =========================================================
 
@@ -710,10 +747,8 @@ class SmartSuiteApp(ctk.CTk):
 
         try: has_subfolders = any(os.scandir(d))
         except Exception as e: 
-            utils.log.debug(f"Fehler bei Prüfung auf Unterordner in '{d}': {e}")
             has_subfolders = False
 
-        # Dieser Dialog erscheint jetzt NUR NOCH bei unbekannten Ordner-Strukturen!
         if has_subfolders:
             def handle_action(action):
                 if action == "batch":
@@ -772,320 +807,240 @@ class SmartSuiteApp(ctk.CTk):
     def w_imp(self, s_input, d):
         ui = self.ui_imp
         source_paths = [p.strip() for p in s_input.split(';') if p.strip()]
-        total_folders = len(source_paths)
-        if total_folders == 0: self.is_running=False; return
+        if len(source_paths) == 0: self.is_running=False; return
 
         total_copied = 0
         
-        for idx, s in enumerate(source_paths):
+        # 1. ZERLEGE DIE EINGABE IN EINE FLACHE LISTE VON ORDNERN
+        process_list = [] # Format: (Ordnerpfad, Modus, Ordnername)
+        
+        for s in source_paths:
+            s_base = os.path.basename(s)
+            s_dir_base = os.path.basename(os.path.dirname(s)) if os.path.dirname(s) else ""
+            
+            # --- SEESTAR ERKENNUNG ---
+            if s_base.lower() == "myworks" or os.path.exists(os.path.join(s, "MyWorks")):
+                scan_dir = os.path.join(s, "MyWorks") if os.path.exists(os.path.join(s, "MyWorks")) else s
+                try:
+                    for f in os.listdir(scan_dir):
+                        if os.path.isdir(os.path.join(scan_dir, f)):
+                            process_list.append((os.path.join(scan_dir, f), "SEESTAR", f))
+                except: pass
+            elif s_dir_base.lower() == "myworks":
+                process_list.append((s, "SEESTAR", s_base))
+                
+            # --- DWARFLAB ERKENNUNG ---
+            elif s_base.lower() == "astronomy" or os.path.exists(os.path.join(s, "Astronomy")):
+                scan_dir = s
+                astro_dir = os.path.join(scan_dir, "Astronomy") if s_base.lower() != "astronomy" else scan_dir
+                
+                if s_base.lower() != "astronomy":
+                    for d_folder in ["Normal_Photos", "Videos", "Panoramas", "Burst"]:
+                        if os.path.exists(os.path.join(scan_dir, d_folder)):
+                            process_list.append((os.path.join(scan_dir, d_folder), "DWARF_DAYTIME", d_folder))
+                            
+                if os.path.exists(astro_dir):
+                    try:
+                        for f in os.listdir(astro_dir):
+                            if os.path.isdir(os.path.join(astro_dir, f)):
+                                process_list.append((os.path.join(astro_dir, f), "DWARF_ASTRO", f))
+                    except: pass
+            elif s_dir_base.lower() == "astronomy":
+                process_list.append((s, "DWARF_ASTRO", s_base))
+            elif s_base.lower() in ["normal_photos", "videos", "panoramas", "burst"]:
+                process_list.append((s, "DWARF_DAYTIME", s_base))
+                
+            # --- GENERIC (NORMALE KAMERAS) ---
+            else:
+                is_mosaic = False
+                if s.startswith("MOSAIC|"):
+                    is_mosaic = True
+                    s = s.replace("MOSAIC|", "")
+                process_list.append((s, "GENERIC_MOSAIC" if is_mosaic else "GENERIC", os.path.basename(s)))
+
+        ui.log(f"\n--- Importiere aus {len(process_list)} erkannten Zielordnern ---")
+        
+        # 2. FILTERN UND KOPIEREN (Für jeden gefundenen Ordner)
+        for p_idx, (folder_path, mode, folder_name) in enumerate(process_list):
             if self.stop_req: break
             
-            # --- 1. GERÄTE-ERKENNUNG ---
-            device_mode = "GENERIC"
-            scan_dir = s
-            is_mosaic_generic = False
+            folder_lower = folder_name.lower()
+            files_to_copy = [] # Format: (Quell-Pfad, Ziel-Pfad)
+            target_dir_log = ""
             
-            if s.startswith("MOSAIC|"):
-                is_mosaic_generic = True
-                scan_dir = s.replace("MOSAIC|", "")
-            elif os.path.basename(s).lower() == "myworks" or os.path.exists(os.path.join(s, "MyWorks")):
-                device_mode = "SEESTAR"
-                scan_dir = os.path.join(s, "MyWorks") if os.path.exists(os.path.join(s, "MyWorks")) else s
-            elif os.path.exists(os.path.join(s, "Astronomy")) or os.path.basename(s).lower() == "astronomy":
-                device_mode = "DWARFLAB"
-                # Scan_dir bleibt 's' (Wir handhaben das in der Logik unten)
+            # =========================================================
+            # MODUS: SEESTAR
+            # =========================================================
+            if mode == "SEESTAR":
+                is_sub_folder = folder_lower.endswith("_sub")
+                is_mosaic = "_mosaic" in folder_lower 
                 
-            ui.log(f"\n--- Import Quelle {idx+1}/{total_folders}: {os.path.basename(scan_dir)} ---")
-            ui.log(f"Erkannter Modus: {device_mode}")
-
-            # =========================================================
-            # SEESTAR HANDLING
-            # =========================================================
-            if device_mode == "SEESTAR":
-                try:
-                    obj_folders = [f for f in os.listdir(scan_dir) if os.path.isdir(os.path.join(scan_dir, f))]
-                except Exception as e:
-                    ui.log(f"Fehler beim Lesen des Seestar-Laufwerks: {e}")
-                    continue
-
-                for obj_folder in obj_folders:
-                    if self.stop_req: break
-                    folder_path = os.path.join(scan_dir, obj_folder)
-                    folder_lower = obj_folder.lower()
-                    
-                    is_sub_folder = folder_lower.endswith("_sub")
-                    is_seestar_mosaic = "_mosaic" in folder_lower 
-                    
-                    files_to_copy = []
-                    target_dir = ""
-                    
-                    if "solar" in folder_lower or "sun" in folder_lower or "lunar" in folder_lower or "moon" in folder_lower:
-                        target_category = "Solar" if "solar" in folder_lower or "sun" in folder_lower else "Lunar"
-                        target_dir = os.path.join(d, "Solar_System", f"{target_category}_Seestar")
-                        for fname in os.listdir(folder_path):
-                            f_low = fname.lower()
-                            if f_low.endswith(('.mp4', '.avi')): files_to_copy.append(fname)
-                                
-                    elif "milkyway" in folder_lower or "scenery" in folder_lower or "timelapse" in folder_lower:
-                        base_target = os.path.join(d, "MilkyWay_Scenery", "MilkyWay_Seestar")
-                        target_dir = os.path.join(base_target, "lights") if is_sub_folder else base_target
-                        for fname in os.listdir(folder_path):
-                            f_low = fname.lower()
-                            if is_sub_folder:
-                                if f_low.endswith(('.fit', '.fits')): files_to_copy.append(fname)
-                            else:
-                                if f_low.endswith('.mp4'): files_to_copy.append(fname)
-
-                    else: # DeepSky Standard Seestar
-                        if not is_sub_folder and self.ign_livestacks.get():
-                            ui.log(f"-> {obj_folder} (Livestacks ignoriert)")
-                            continue
+                if "solar" in folder_lower or "sun" in folder_lower or "lunar" in folder_lower or "moon" in folder_lower:
+                    target_category = "Solar" if "solar" in folder_lower or "sun" in folder_lower else "Lunar"
+                    target_dir = os.path.join(d, "Solar_System", f"{target_category}_Seestar")
+                    target_dir_log = os.path.relpath(target_dir, d)
+                    for fname in os.listdir(folder_path):
+                        if fname.lower().endswith(('.mp4', '.avi')):
+                            files_to_copy.append((os.path.join(folder_path, fname), os.path.join(target_dir, fname)))
                             
-                        fits_candidates = [f for f in os.listdir(folder_path) if f.lower().endswith(('.fit', '.fits'))]
-                        if not fits_candidates: continue 
+                elif "milkyway" in folder_lower or "scenery" in folder_lower or "timelapse" in folder_lower:
+                    base_target = os.path.join(d, "MilkyWay_Scenery", "MilkyWay_Seestar")
+                    target_dir = os.path.join(base_target, "lights") if is_sub_folder else base_target
+                    target_dir_log = os.path.relpath(target_dir, d)
+                    for fname in os.listdir(folder_path):
+                        if is_sub_folder and fname.lower().endswith(('.fit', '.fits')):
+                            files_to_copy.append((os.path.join(folder_path, fname), os.path.join(target_dir, fname)))
+                        elif not is_sub_folder and fname.lower().endswith('.mp4'):
+                            files_to_copy.append((os.path.join(folder_path, fname), os.path.join(target_dir, fname)))
+                else:
+                    if not is_sub_folder and self.ign_livestacks.get():
+                        ui.log(f"-> {folder_name} (Livestacks ignoriert)")
+                        continue
                         
+                    fits_candidates = [f for f in os.listdir(folder_path) if f.lower().endswith(('.fit', '.fits'))]
+                    if fits_candidates:
                         t, c, dev = utils.analyze_header(os.path.join(folder_path, fits_candidates[0]))
-                        if not t: continue
-                        if is_seestar_mosaic and not t.lower().endswith("mosaic"): t += "_Mosaic"
-                        
-                        target_dir = os.path.join(d, c, f"{t}_{dev}", "lights" if is_sub_folder else "livestacks")
-                        
-                        for fname in os.listdir(folder_path):
-                            f_low = fname.lower()
-                            if "_thn" in f_low or f_low.startswith("."): continue 
-                            if is_sub_folder:
-                                if f_low.endswith(('.fit', '.fits')): files_to_copy.append(fname)
-                            else:
-                                if f_low.endswith(('.fit', '.fits', '.jpg', '.jpeg')): files_to_copy.append(fname)
-
-                    if not files_to_copy: continue
-                    os.makedirs(target_dir, exist_ok=True)
-                    rel_target = os.path.relpath(target_dir, d)
-                    ui.log(f"-> {obj_folder} ({len(files_to_copy)} Dateien)  =>  {rel_target}")
-                    
-                    for i, fname in enumerate(files_to_copy):
-                        if self.stop_req: break
-                        src_file = os.path.join(folder_path, fname)
-                        dest_file = os.path.join(target_dir, fname)
-                        try:
-                            shutil.copy2(src_file, dest_file); total_copied += 1
-                            if self.fix_n.get() and fname.lower().endswith(('.fit', '.fits')): utils.apply_nina_fix(dest_file)
-                            self.after(0, lambda c_=i+1, tot=len(files_to_copy), name=obj_folder: ui.set_progress(c_, tot, f"Kopiere {name}"))
-                        except Exception as e: utils.log.error(f"Fehler bei '{fname}': {e}")
-
+                        if t:
+                            if is_mosaic and not t.lower().endswith("mosaic"): t += "_Mosaic"
+                            target_dir = os.path.join(d, c, f"{t}_{dev}", "lights" if is_sub_folder else "livestacks")
+                            target_dir_log = os.path.relpath(target_dir, d)
+                            for fname in os.listdir(folder_path):
+                                f_low = fname.lower()
+                                if "_thn" in f_low or f_low.startswith("."): continue 
+                                if is_sub_folder and f_low.endswith(('.fit', '.fits')):
+                                    files_to_copy.append((os.path.join(folder_path, fname), os.path.join(target_dir, fname)))
+                                elif not is_sub_folder and f_low.endswith(('.fit', '.fits', '.jpg', '.jpeg')):
+                                    files_to_copy.append((os.path.join(folder_path, fname), os.path.join(target_dir, fname)))
 
             # =========================================================
-            # DWARFLAB HANDLING
+            # MODUS: DWARFLAB ASTRO
             # =========================================================
-            elif device_mode == "DWARFLAB":
-                # 1. Normale Medien (Daytime/Scenery)
-                daytime_folders = ["Normal_Photos", "Videos", "Panoramas", "Burst"]
-                for d_folder in daytime_folders:
-                    full_d_folder = os.path.join(scan_dir, d_folder)
-                    if os.path.exists(full_d_folder):
-                        target_dir = os.path.join(d, "Daytime_Scenery", f"{d_folder}_Dwarf")
-                        os.makedirs(target_dir, exist_ok=True)
-                        
-                        daytime_files = []
-                        for fname in os.listdir(full_d_folder):
-                            if os.path.isdir(os.path.join(full_d_folder, fname)) or "thumbnail" in fname.lower() or fname.endswith(".log"):
-                                continue
-                            daytime_files.append(fname)
-                            
-                        if daytime_files:
-                            rel_target = os.path.relpath(target_dir, d)
-                            ui.log(f"-> {d_folder} (Media) ({len(daytime_files)} Dateien)  =>  {rel_target}")
-                            for i, fname in enumerate(daytime_files):
-                                if self.stop_req: break
-                                try:
-                                    shutil.copy2(os.path.join(full_d_folder, fname), os.path.join(target_dir, fname))
-                                    total_copied += 1
-                                    self.after(0, lambda c_=i+1, tot=len(daytime_files), name=d_folder: ui.set_progress(c_, tot, f"Kopiere {name}"))
-                                except Exception as e: utils.log.error(f"Fehler bei '{fname}': {e}")
-
-                # 2. Astronomy Ordner verarbeiten
-                astro_dir = os.path.join(scan_dir, "Astronomy") if os.path.basename(scan_dir).lower() != "astronomy" else scan_dir
+            elif mode == "DWARF_ASTRO":
+                ignore_dirs = ["cali_frame", "dwarf_dark", "solving_failed", "restacked", "startrails"]
+                if folder_lower in ignore_dirs or folder_name.startswith("."): continue
                 
-                if os.path.exists(astro_dir):
-                    ignore_astro_dirs = ["cali_frame", "dwarf_dark", "solving_failed", "restacked", "startrails"]
+                # Sonne & Mond datumsbasiert
+                if "_sun_" in folder_lower or "_moon_" in folder_lower:
+                    target_category = "Solar" if "_sun_" in folder_lower else "Lunar"
+                    import re
+                    match = re.search(r'\d{4}-\d{2}-\d{2}', folder_name)
+                    date_str = match.group(0) if match else "Unknown_Date"
                     
-                    try: astro_folders = [f for f in os.listdir(astro_dir) if os.path.isdir(os.path.join(astro_dir, f))]
-                    except: astro_folders = []
-
-                    for a_folder in astro_folders:
-                        if self.stop_req: break
-                        a_folder_low = a_folder.lower()
-                        if a_folder_low in ignore_astro_dirs or a_folder.startswith("."): continue
+                    target_dir = os.path.join(d, "Solar_System", f"{target_category}_Dwarf", date_str)
+                    target_dir_log = os.path.relpath(target_dir, d)
+                    for fname in os.listdir(folder_path):
+                        if os.path.isdir(os.path.join(folder_path, fname)): continue
+                        f_low = fname.lower()
+                        if "thumbnail" in f_low or f_low.startswith("failed"): continue
+                        files_to_copy.append((os.path.join(folder_path, fname), os.path.join(target_dir, fname)))
                         
-                        folder_path = os.path.join(astro_dir, a_folder)
-                        
-                        # -------------------------------------------------
-                        # SONNE & MOND (Dwarf Astronomy)
-                        # -------------------------------------------------
-                        if "_sun_" in a_folder_low or "_moon_" in a_folder_low:
-                            target_category = "Solar" if "_sun_" in a_folder_low else "Lunar"
-                            
-                            import re
-                            match = re.search(r'\d{4}-\d{2}-\d{2}', a_folder)
-                            date_str = match.group(0) if match else "Unknown_Date"
-                            
-                            target_dir = os.path.join(d, "Solar_System", f"{target_category}_Dwarf", date_str)
-                            os.makedirs(target_dir, exist_ok=True)
-                            
-                            copy_tasks = []
-                            for fname in os.listdir(folder_path):
-                                if os.path.isdir(os.path.join(folder_path, fname)): continue
-                                f_low = fname.lower()
-                                if "thumbnail" in f_low or f_low.startswith("failed"): continue
-                                
-                                copy_tasks.append((os.path.join(folder_path, fname), os.path.join(target_dir, fname)))
-                            
-                            if copy_tasks:
-                                rel_target = os.path.relpath(target_dir, d)
-                                ui.log(f"-> {a_folder} ({len(copy_tasks)} Dateien)  =>  {rel_target}")
-                                for i, (src_file, dest_file) in enumerate(copy_tasks):
-                                    if self.stop_req: break
-                                    try:
-                                        shutil.copy2(src_file, dest_file); total_copied += 1
-                                        self.after(0, lambda c_=i+1, tot=len(copy_tasks), name=a_folder: ui.set_progress(c_, tot, f"Kopiere {name}"))
-                                    except Exception as e: utils.log.error(f"Fehler bei '{os.path.basename(src_file)}': {e}")
-                            
-                            continue 
+                else: # DeepSky
+                    is_mosaic = "_mosaic_" in folder_lower
+                    sample_fit = None
+                    if is_mosaic:
+                        for sub_d in os.listdir(folder_path):
+                            sub_d_path = os.path.join(folder_path, sub_d)
+                            if os.path.isdir(sub_d_path):
+                                fits_in_sub = [f for f in os.listdir(sub_d_path) if f.lower().endswith('.fits') and not f.lower().startswith('failed')]
+                                if fits_in_sub: sample_fit = os.path.join(sub_d_path, fits_in_sub[0]); break
+                    else:
+                        fits_in_root = [f for f in os.listdir(folder_path) if f.lower().endswith('.fits') and not f.lower().startswith('failed')]
+                        if fits_in_root: sample_fit = os.path.join(folder_path, fits_in_root[0])
 
-
-                        # -------------------------------------------------
-                        # DEEP SKY & MILKY WAY (Dwarf)
-                        # -------------------------------------------------
-                        is_mosaic = "_mosaic_" in a_folder_low
-                        
-                        sample_fit = None
-                        if is_mosaic:
-                            for sub_d in os.listdir(folder_path):
-                                sub_d_path = os.path.join(folder_path, sub_d)
-                                if os.path.isdir(sub_d_path):
-                                    fits_in_sub = [f for f in os.listdir(sub_d_path) if f.lower().endswith('.fits') and not f.lower().startswith('failed')]
-                                    if fits_in_sub:
-                                        sample_fit = os.path.join(sub_d_path, fits_in_sub[0])
-                                        break
-                        else:
-                            fits_in_root = [f for f in os.listdir(folder_path) if f.lower().endswith('.fits') and not f.lower().startswith('failed')]
-                            if fits_in_root: sample_fit = os.path.join(folder_path, fits_in_root[0])
-
-                        if not sample_fit: continue 
-                        
+                    if sample_fit:
                         t, c, dev = utils.analyze_header(sample_fit)
-                        if not t: continue
-                        if is_mosaic and not t.lower().endswith("mosaic"): t += "_Mosaic"
-                        
-                        base_target = os.path.join(d, c, f"{t}_{dev}")
-                        lights_target = os.path.join(base_target, "lights")
-                        lives_target = os.path.join(base_target, "livestacks")
-                        
-                        copy_tasks = [] 
-                        
-                        if is_mosaic:
-                            if not self.ign_livestacks.get():
-                                for fname in os.listdir(folder_path):
-                                    if os.path.isfile(os.path.join(folder_path, fname)):
-                                        f_low = fname.lower()
-                                        # Nur Dateien die exakt mit "stacked" anfangen (z.B. stacked.jpg, stacked-16...)
-                                        if f_low.startswith("stacked") and "thumbnail" not in f_low:
-                                            copy_tasks.append((os.path.join(folder_path, fname), os.path.join(lives_target, fname)))
+                        if t:
+                            if is_mosaic and not t.lower().endswith("mosaic"): t += "_Mosaic"
+                            base_target = os.path.join(d, c, f"{t}_{dev}")
+                            lights_target = os.path.join(base_target, "lights")
+                            lives_target = os.path.join(base_target, "livestacks")
+                            target_dir_log = os.path.relpath(base_target, d)
                             
-                            for sub_d in os.listdir(folder_path):
-                                sub_d_path = os.path.join(folder_path, sub_d)
-                                if os.path.isdir(sub_d_path):
-                                    for fname in os.listdir(sub_d_path):
-                                        f_low = fname.lower()
-                                        if f_low.endswith(('.fit', '.fits')) and not f_low.startswith("failed"):
-                                            new_fname = f"{sub_d}_{fname}"
-                                            copy_tasks.append((os.path.join(sub_d_path, fname), os.path.join(lights_target, new_fname)))
-                                            
-                        else:
-                            for fname in os.listdir(folder_path):
-                                if os.path.isdir(os.path.join(folder_path, fname)): continue
-                                f_low = fname.lower()
+                            if is_mosaic:
+                                if not self.ign_livestacks.get():
+                                    for fname in os.listdir(folder_path):
+                                        if os.path.isfile(os.path.join(folder_path, fname)):
+                                            f_low = fname.lower()
+                                            if f_low.startswith("stacked") and "thumbnail" not in f_low:
+                                                files_to_copy.append((os.path.join(folder_path, fname), os.path.join(lives_target, fname)))
                                 
-                                if f_low.startswith("failed") or "thumbnail" in f_low: continue
-                                
-                                # Strenger Check für Livestacks: Muss mit "stacked" beginnen!
-                                if f_low.startswith("stacked"):
-                                    if not self.ign_livestacks.get():
-                                        copy_tasks.append((os.path.join(folder_path, fname), os.path.join(lives_target, fname)))
-                                        
-                                elif f_low.endswith(('.fit', '.fits')):
-                                    copy_tasks.append((os.path.join(folder_path, fname), os.path.join(lights_target, fname)))
-
-                        if not copy_tasks: continue
-                        
-                        os.makedirs(lights_target, exist_ok=True)
-                        os.makedirs(lives_target, exist_ok=True)
-                        
-                        rel_target = os.path.relpath(base_target, d)
-                        ui.log(f"-> {a_folder} ({len(copy_tasks)} Dateien)  =>  {rel_target}")
-                        
-                        for i, (src_file, dest_file) in enumerate(copy_tasks):
-                            if self.stop_req: break
-                            try:
-                                shutil.copy2(src_file, dest_file); total_copied += 1
-                                if self.fix_n.get() and dest_file.lower().endswith(('.fit', '.fits')): utils.apply_nina_fix(dest_file)
-                                self.after(0, lambda c_=i+1, tot=len(copy_tasks), name=a_folder: ui.set_progress(c_, tot, f"Kopiere {name}"))
-                            except Exception as e: utils.log.error(f"Fehler bei '{os.path.basename(src_file)}': {e}")
-
+                                for sub_d in os.listdir(folder_path):
+                                    sub_d_path = os.path.join(folder_path, sub_d)
+                                    if os.path.isdir(sub_d_path):
+                                        for fname in os.listdir(sub_d_path):
+                                            f_low = fname.lower()
+                                            if f_low.endswith(('.fit', '.fits')) and not f_low.startswith("failed"):
+                                                files_to_copy.append((os.path.join(sub_d_path, fname), os.path.join(lights_target, f"{sub_d}_{fname}")))
+                            else:
+                                for fname in os.listdir(folder_path):
+                                    if os.path.isdir(os.path.join(folder_path, fname)): continue
+                                    f_low = fname.lower()
+                                    if f_low.startswith("failed") or "thumbnail" in f_low: continue
+                                    
+                                    if f_low.startswith("stacked"):
+                                        if not self.ign_livestacks.get():
+                                            files_to_copy.append((os.path.join(folder_path, fname), os.path.join(lives_target, fname)))
+                                    elif f_low.endswith(('.fit', '.fits')):
+                                        files_to_copy.append((os.path.join(folder_path, fname), os.path.join(lights_target, fname)))
 
             # =========================================================
-            # GENERIC HANDLING (Manuelle Ordner / Andere Teleskope)
+            # MODUS: DWARFLAB DAYTIME MEDIA
             # =========================================================
-            else:
+            elif mode == "DWARF_DAYTIME":
+                target_dir = os.path.join(d, "Daytime_Scenery", f"{folder_name}_Dwarf")
+                target_dir_log = os.path.relpath(target_dir, d)
+                for fname in os.listdir(folder_path):
+                    if os.path.isdir(os.path.join(folder_path, fname)) or "thumbnail" in fname.lower() or fname.endswith(".log"):
+                        continue
+                    files_to_copy.append((os.path.join(folder_path, fname), os.path.join(target_dir, fname)))
+
+            # =========================================================
+            # MODUS: GENERIC / MANUELL
+            # =========================================================
+            elif mode.startswith("GENERIC"):
                 raw_files = []
                 try:
-                    if is_mosaic_generic:
-                        for r, _, f in os.walk(scan_dir):
+                    if mode == "GENERIC_MOSAIC":
+                        for r, _, f in os.walk(folder_path):
                             for x in f: raw_files.append(os.path.join(r, x))
                     else:
-                        for x in os.listdir(scan_dir): raw_files.append(os.path.join(scan_dir, x))
-                except Exception as e:
-                    ui.log(f"Fehler beim Scannen von '{scan_dir}': {e}")
-                    continue
+                        for x in os.listdir(folder_path): raw_files.append(os.path.join(folder_path, x))
+                except Exception as e: ui.log(f"Fehler: {e}"); continue
 
                 fit_candidates = [f for f in raw_files if f.lower().endswith(('.fit', '.fits'))]
-                if not fit_candidates: 
-                    ui.log(f"Überspringe: Keine FITS gefunden.")
-                    continue
+                if fit_candidates:
+                    t, c, dev = None, None, None
+                    for cand in fit_candidates:
+                        t, c, dev = utils.analyze_header(cand)
+                        if t: break 
+                    
+                    if t:
+                        target_dir = os.path.join(d, c, f"{t}_{dev}", "lights")
+                        target_dir_log = os.path.relpath(target_dir, d)
+                        for f in raw_files:
+                            if f.lower().endswith(('.fit', '.fits')) and not os.path.basename(f).startswith(("stack", "failed", ".")):
+                                files_to_copy.append((f, os.path.join(target_dir, os.path.basename(f))))
 
-                t, c, dev = None, None, None
-                for cand in fit_candidates:
-                    t, c, dev = utils.analyze_header(cand)
-                    if t: break 
-                
-                if not t:
-                    ui.log(f"FEHLER: Kein lesbarer Header.")
-                    continue
-
-                target_dir = os.path.join(d, c, f"{t}_{dev}", "lights")
-                files_to_copy = [f for f in raw_files if f.lower().endswith(('.fit', '.fits')) and not os.path.basename(f).startswith(("stack", "failed", "."))]
-
-                if not files_to_copy: continue
-                
-                os.makedirs(target_dir, exist_ok=True)
-                rel_target = os.path.relpath(target_dir, d)
-                ui.log(f"-> {os.path.basename(scan_dir)} ({len(files_to_copy)} Dateien)  =>  {rel_target}")
-                
-                for i, f in enumerate(files_to_copy):
+            # --- KOPIEREN AUSFÜHREN ---
+            if files_to_copy:
+                ui.log(f"-> {folder_name} ({len(files_to_copy)} Dateien)  =>  {target_dir_log}")
+                for i, (src_file, dest_file) in enumerate(files_to_copy):
                     if self.stop_req: break
-                    dest = os.path.join(target_dir, os.path.basename(f))
+                    os.makedirs(os.path.dirname(dest_file), exist_ok=True) # Legt den Ordner sicher an
                     try:
-                        shutil.copy2(f, dest); total_copied += 1
-                        if self.fix_n.get(): utils.apply_nina_fix(dest)
-                        self.after(0, lambda c_=i+1, tot=len(files_to_copy): ui.set_progress(c_, tot, "Importiere Dateien"))
+                        shutil.copy2(src_file, dest_file)
+                        total_copied += 1
+                        if self.fix_n.get() and dest_file.lower().endswith(('.fit', '.fits')): 
+                            utils.apply_nina_fix(dest_file)
+                        self.after(0, lambda c_=i+1, tot=len(files_to_copy), name=folder_name: ui.set_progress(c_, tot, f"Kopiere {name}"))
                     except Exception as e: 
-                        utils.log.exception(f"Fehler bei '{f}': {e}")
+                        utils.log.error(f"Fehler bei '{os.path.basename(src_file)}': {e}")
 
         # --- ABSCHLUSS ---
         self.is_running = False
         final_msg = f"\nFERTIG: {total_copied} Dateien importiert."
-        final_open_dir = target_dir if 'target_dir' in locals() and target_dir else d
-        self.after(0, lambda: (ui.log(final_msg), ui.btn_stop.configure(state="disabled"), ui.btn_open.configure(state="normal", text="Letztes Ziel öffnen", command=lambda: os.startfile(final_open_dir) if os.path.exists(final_open_dir) else None)))
+        # Öffne den Hauptordner am PC, damit der User das Ergebnis sieht
+        self.after(0, lambda: (ui.log(final_msg), ui.btn_stop.configure(state="disabled"), ui.btn_open.configure(state="normal", text="Ziel-Ordner öffnen", command=lambda: os.startfile(d) if os.path.exists(d) else None)))
 
     # --- MULTI-FOLDER ARCHIVE WORKER ---
     def w_arc(self, s_input, d):

@@ -250,7 +250,8 @@ def load_aae_targets_rich():
     cfg = utils.load_config()
     lat = float(cfg.get("default_lat", 51.16))
     lon = float(cfg.get("default_lon", 10.45))
-    loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg)
+    elevation = float(cfg.get("default_elevation", 0)) # <--- DIESE ZEILE HAT GEFEHLT!
+    loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg, height=elevation*u.m)
     now = Time.now()
     local_tz = pytz.timezone('Europe/Berlin')
     
@@ -752,7 +753,8 @@ class ObsListFrame(ctk.CTkFrame):
         cfg = utils.load_config()
         lat = float(cfg.get("default_lat", 51.16))
         lon = float(cfg.get("default_lon", 10.45))
-        loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg)
+        elevation = float(cfg.get("default_elevation", 0))
+        loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg, height=elevation*u.m)
         local_tz = pytz.timezone('Europe/Berlin')
 
         now = datetime.now(local_tz)
@@ -1245,7 +1247,8 @@ class ObsListFrame(ctk.CTkFrame):
         
         lat = float(cfg.get("default_lat", 51.16))
         lon = float(cfg.get("default_lon", 10.45))
-        loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg)
+        elevation = float(cfg.get("default_elevation", 0)) # <--- DIESE ZEILE HAT GEFEHLT!
+        loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg, height=elevation*u.m)
 
         def get_best_time(ra_deg, dec_deg):
             max_alt = 90 - abs(lat - dec_deg)

@@ -268,7 +268,14 @@ class AstroCalendarFrame(ctk.CTkFrame):
         cfg = utils.load_config()
         lat = float(cfg.get("default_lat", "51.16"))
         lon = float(cfg.get("default_lon", "10.45"))
-        elevation = float(cfg.get("default_elevation", "0")) # <--- NEU
+        
+        # Sicheres Parsen der Höhe (Filtert Kommas, Text und leere Felder)
+        try:
+            ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
+            elevation = float(ele_raw) if ele_raw else 0.0
+        except:
+            elevation = 0.0
+            
         local_tz = pytz.timezone('Europe/Berlin')
         events = []
         
@@ -479,7 +486,14 @@ class AstroCalendarFrame(ctk.CTkFrame):
         observer = ephem.Observer()
         observer.lat = lat_str
         observer.lon = lon_str
-        observer.elevation = float(cfg.get("default_elevation", "0"))
+        
+        # Sicheres Parsen der Höhe
+        try:
+            ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
+            observer.elevation = float(ele_raw) if ele_raw else 0.0
+        except:
+            observer.elevation = 0.0
+            
         moon = ephem.Moon()
         sun = ephem.Sun()
         

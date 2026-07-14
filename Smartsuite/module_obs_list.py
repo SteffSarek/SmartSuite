@@ -250,7 +250,14 @@ def load_aae_targets_rich():
     cfg = utils.load_config()
     lat = float(cfg.get("default_lat", 51.16))
     lon = float(cfg.get("default_lon", 10.45))
-    elevation = float(cfg.get("default_elevation", 0)) # <--- DIESE ZEILE HAT GEFEHLT!
+    
+    # Sicheres Parsen der Höhe
+    try:
+        ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
+        elevation = float(ele_raw) if ele_raw else 0.0
+    except:
+        elevation = 0.0
+        
     loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg, height=elevation*u.m)
     now = Time.now()
     local_tz = pytz.timezone('Europe/Berlin')
@@ -753,7 +760,14 @@ class ObsListFrame(ctk.CTkFrame):
         cfg = utils.load_config()
         lat = float(cfg.get("default_lat", 51.16))
         lon = float(cfg.get("default_lon", 10.45))
-        elevation = float(cfg.get("default_elevation", 0))
+        
+        # Sicheres Parsen der Höhe
+        try:
+            ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
+            elevation = float(ele_raw) if ele_raw else 0.0
+        except:
+            elevation = 0.0
+            
         loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg, height=elevation*u.m)
         local_tz = pytz.timezone('Europe/Berlin')
 
@@ -1247,7 +1261,14 @@ class ObsListFrame(ctk.CTkFrame):
         
         lat = float(cfg.get("default_lat", 51.16))
         lon = float(cfg.get("default_lon", 10.45))
-        elevation = float(cfg.get("default_elevation", 0)) # <--- DIESE ZEILE HAT GEFEHLT!
+        
+        # Sicheres Parsen der Höhe
+        try:
+            ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
+            elevation = float(ele_raw) if ele_raw else 0.0
+        except:
+            elevation = 0.0
+            
         loc = EarthLocation(lat=lat*u.deg, lon=lon*u.deg, height=elevation*u.m)
 
         def get_best_time(ra_deg, dec_deg):

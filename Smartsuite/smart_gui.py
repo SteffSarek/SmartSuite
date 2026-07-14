@@ -196,37 +196,52 @@ class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, parent, current_version):
         super().__init__(parent)
         
-        # --- HIER ÄNDERN (aus 650 mach 850) ---
-        self.title("Einstellungen"); self.geometry("750x850"); self.version = current_version
+        self.title("Einstellungen")
+        self.geometry("750x850")
+        self.version = current_version
         
         apply_safe_focus(self)
         
         c = utils.load_config()
-        self.path_siril = tk.StringVar(value=os.path.normpath(c.get("custom_siril_path", utils.find_siril_path())))
-        self.path_scripts = tk.StringVar(value=os.path.normpath(c.get("custom_scripts_path", "")))
         
-        # --- NEU FÜR ASTROTRACKER ---
-        self.path_astap = tk.StringVar(value=os.path.normpath(c.get("astap_path", "")))
-        self.path_aladin = tk.StringVar(value=os.path.normpath(c.get("aladin_path", "")))
-        self.path_export = tk.StringVar(value=os.path.normpath(c.get("export_path", ""))) # <--- NEU
+        # Sicherstellen, dass normpath keine Abstürze bei leeren Configs verursacht
+        def safe_path(val):
+            return os.path.normpath(str(val)) if val else ""
+            
+        self.path_siril = tk.StringVar(value=safe_path(c.get("custom_siril_path", utils.find_siril_path())))
+        self.path_scripts = tk.StringVar(value=safe_path(c.get("custom_scripts_path", "")))
+        self.path_astap = tk.StringVar(value=safe_path(c.get("astap_path", "")))
+        self.path_aladin = tk.StringVar(value=safe_path(c.get("aladin_path", "")))
+        self.path_export = tk.StringVar(value=safe_path(c.get("export_path", ""))) 
         
-        self.def_lat = tk.StringVar(value=c.get("default_lat", "51.16")) 
-        self.def_lon = tk.StringVar(value=c.get("default_lon", "10.45"))
-        self.def_ele = tk.StringVar(value=str(c.get("default_elevation", "0"))) # <--- NEU
+        self.def_lat = tk.StringVar(value=str(c.get("default_lat", "51.16"))) 
+        self.def_lon = tk.StringVar(value=str(c.get("default_lon", "10.45")))
+        
+        # Höhe über NN von "m" und Kommas befreien für sichere Anzeige
+        raw_ele = str(c.get("default_elevation", "0")).replace("m", "").replace("M", "").strip()
+        self.def_ele = tk.StringVar(value=raw_ele) 
+        
         self.session_gap = tk.StringVar(value=str(c.get("session_gap", "5")))
         
-        # ... (bestehende traces) ...
+        # Alle Traces (Automatisches Speichern) wiederherstellen!
+        self.path_siril.trace_add("write", lambda *a: utils.save_config("custom_siril_path", self.path_siril.get()))
+        self.path_scripts.trace_add("write", lambda *a: utils.save_config("custom_scripts_path", self.path_scripts.get()))
+        self.path_astap.trace_add("write", lambda *a: utils.save_config("astap_path", self.path_astap.get()))
+        self.path_aladin.trace_add("write", lambda *a: utils.save_config("aladin_path", self.path_aladin.get()))
+        self.path_export.trace_add("write", lambda *a: utils.save_config("export_path", self.path_export.get()))
+        self.session_gap.trace_add("write", lambda *a: utils.save_config("session_gap", self.session_gap.get()))
         self.def_lat.trace_add("write", lambda *a: utils.save_config("default_lat", self.def_lat.get()))
         self.def_lon.trace_add("write", lambda *a: utils.save_config("default_lon", self.def_lon.get()))
-        self.def_ele.trace_add("write", lambda *a: utils.save_config("default_elevation", self.def_ele.get())) # <--- NEU
+        self.def_ele.trace_add("write", lambda *a: utils.save_config("default_elevation", self.def_ele.get())) 
 
-        self.build_ui()
+        try:
+            self.build_ui()
+        except Exception as e:
+            utils.log.error(f"Fehler beim Aufbau der Einstellungen: {e}")
 
     def build_ui(self):
         ctk.CTkLabel(self, text="Programm Einstellungen", font=("Arial", 18, "bold")).pack(pady=20)
         
-        # WICHTIG: Hier wurde "AstroArchive (.exe)" zu "Externe Programme (Ordner)"
-        # und der Wert 'False' am Ende wurde zu 'True', damit sich die Ordnerauswahl öffnet!
         configs = [
             ("Siril Pfad:", self.path_siril, False),
             ("Siril Skripte:", self.path_scripts, True),
@@ -261,9 +276,8 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkEntry(row, textvariable=self.def_lon, width=70).pack(side="left", padx=2)
         ctk.CTkLabel(row, text="Höhe (m):").pack(side="left", padx=2)
         ctk.CTkEntry(row, textvariable=self.def_ele, width=50).pack(side="left", padx=2)
-        ctk.CTkLabel(gf, text="Bsp: Berlin = 52.52 / 13.40 / 34m (Höhe ü.N.N)", text_color="gray", font=("Arial", 10)).pack(pady=2)
+        ctk.CTkLabel(gf, text="Bsp: Berlin = 52.52 / 13.40 / 34 (Höhe ü.N.N)", text_color="gray", font=("Arial", 10)).pack(pady=2)
 
-        # --- NEU: DATENBANK WARTUNG (ASTROTRACKER) ---
         db_frame = ctk.CTkFrame(self)
         db_frame.pack(fill="x", padx=20, pady=10)
         ctk.CTkLabel(db_frame, text="Datenbank-Wartung (Astrotracker):", font=("Arial", 12, "bold")).pack(pady=(10, 5), padx=10, anchor="w")
@@ -287,11 +301,7 @@ class SettingsWindow(ctk.CTkToplevel):
             p = filedialog.askopenfilename(parent=self, filetypes=[("Executables", "*.exe"), ("All Files", "*.*")])
         
         apply_safe_focus(self)
-        
-        if p: 
-            str_var.set(os.path.normpath(p))
-            if str_var == self.path_tools:
-                messagebox.showinfo("Neustart erforderlich", "Pfad gespeichert.\nBitte SmartSuite neu starten!", parent=self)
+        if p: str_var.set(os.path.normpath(p))
 
     def close_window(self):
         self.withdraw()
@@ -305,33 +315,26 @@ class SettingsWindow(ctk.CTkToplevel):
             import gzip
             import threading
             
-            data_dir = utils.get_data_dir() # <--- Holt den neuen Ordner!
+            data_dir = utils.get_data_dir()
             url = "https://minorplanetcenter.net/iau/MPCORB/MPCORB.DAT.gz"
             zip_file = os.path.join(data_dir, "MPCORB.DAT.gz")
             txt_file = os.path.join(data_dir, "bright_asteroids.txt")
             headers = {'User-Agent': 'Mozilla/5.0'}
             
             try:
-                # 1. Download
                 response = requests.get(url, headers=headers, stream=True, timeout=60)
                 response.raise_for_status()
-                
                 with open(zip_file, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                    for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
                 
-                # 2. Entpacken und Filtern
                 self.after(0, lambda: self.btn_update_ast.configure(text="⏳ Extrahiere helle Asteroiden..."))
-
                 with gzip.open(zip_file, "rt", encoding="utf-8") as f_in, open(txt_file, "w", encoding="utf-8") as f_out:
                     for i, line in enumerate(f_in):
                         if i < 200: f_out.write(line)
                             
                 if os.path.exists(zip_file): os.remove(zip_file)
-                    
                 self.after(0, lambda: self.btn_update_ast.configure(state="normal", text="🪨 Helle Asteroiden (Klassiker) neu laden"))
                 self.after(0, lambda: messagebox.showinfo("Erfolg", f"Datenbank aktualisiert!\n\nDie Datei '{os.path.basename(txt_file)}' ist nun auf dem neuesten Stand."))
-                
             except Exception as e:
                 self.after(0, lambda: self.btn_update_ast.configure(state="normal", text="🪨 Helle Asteroiden (Klassiker) neu laden"))
                 self.after(0, lambda err=str(e): messagebox.showerror("Fehler", f"Download fehlgeschlagen:\n{err}"))

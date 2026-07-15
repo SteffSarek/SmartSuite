@@ -535,26 +535,29 @@ class SmartSuiteApp(ctk.CTk):
         # --- EXTERNE PROGRAMME ---
         ctk.CTkLabel(self.sidebar, text="Externe Programme", text_color="gray").grid(row=10, column=0, sticky="w", padx=20, pady=(25, 5))
         
-        # Astrotracker wurde hier aus der Liste entfernt
+        # Nur noch die Basis-Namen (ohne .exe) eintragen!
         external_tools = [
-            ("VStarAnalyzer.exe", "🌟 VStarAnalyzer"),
-            ("ShortStacker.exe", "⚡ ShortStacker"),
-            ("AstroArchiveExplorer.exe", "🚀 Archive Explorer")
+            ("VStarAnalyzer", "🌟 VStarAnalyzer"),
+            ("ShortStacker", "⚡ ShortStacker"),
+            ("AstroArchiveExplorer", "🚀 Archive Explorer")
         ]
         
         row_idx = 11
         tools_found = False
         
-        for exe_name, btn_label in external_tools:
-            # Prüfen, ob das Tool existiert
-            if self.get_tool_path(exe_name) is not None:
+        for base_name, btn_label in external_tools:
+            # Die Suchfunktion liefert jetzt direkt den vollen, korrekten Pfad zurück
+            actual_path = self.get_tool_path(base_name)
+            
+            if actual_path is not None:
                 tools_found = True
-                btn = ctk.CTkButton(self.sidebar, text=btn_label, anchor="w", fg_color="transparent", command=lambda e=exe_name: self.run_local_tool(e))
+                # Wir übergeben jetzt den fertigen Pfad an den Button
+                btn = ctk.CTkButton(self.sidebar, text=btn_label, anchor="w", fg_color="transparent", command=lambda p=actual_path: self.run_local_tool(p))
                 btn.grid(row=row_idx, column=0, padx=10, pady=2, sticky="ew")
                 row_idx += 1
                 
         if not tools_found:
-            ctk.CTkLabel(self.sidebar, text="(Keine .exe gefunden)", text_color="gray", font=("Arial", 11)).grid(row=row_idx, column=0, padx=20, pady=2, sticky="w")
+            ctk.CTkLabel(self.sidebar, text="(Keine Tools gefunden)", text_color="gray", font=("Arial", 11)).grid(row=row_idx, column=0, padx=20, pady=2, sticky="w")
 
         # --- EINSTELLUNGEN (Ganz unten) ---
         # FIX: Die "unsichtbare Feder" auf Zeile 20 setzen, weit weg von den Buttons!
@@ -779,32 +782,43 @@ class SmartSuiteApp(ctk.CTk):
             ui.btn_stop.configure(state="normal")
             threading.Thread(target=func, args=args, daemon=True).start()
 
-    def get_tool_path(self, exe_name):
-        """ Sucht nach externen Programmen im selben Ordner wie die SmartSuite """
-        # 1. Im Ordner suchen, in dem die SmartSuite liegt
+    def get_tool_path(self, base_name):
+        """ Sucht nach externen Programmen OS-unabhängig """
+        import platform
+        is_windows = platform.system() == "Windows"
+        
+        # OS-spezifische Dateinamen generieren
+        if is_windows:
+            possible_names = [f"{base_name}.exe"]
+        else:
+            # Unter Linux suchen wir nach dem _Linux Suffix (aus der spec) oder dem nackten Namen
+            possible_names = [f"{base_name}_Linux", base_name]
+
         base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        p = os.path.join(base_dir, exe_name)
-        if os.path.exists(p): return p
+        cwd_dir = os.getcwd()
         
-        # 2. Zum Schluss im aktuellen Arbeitsverzeichnis (Working Dir) suchen
-        p = os.path.join(os.getcwd(), exe_name)
-        if os.path.exists(p): return p
-        
+        for name in possible_names:
+            # 1. Im Ordner suchen, in dem die SmartSuite liegt
+            p1 = os.path.join(base_dir, name)
+            if os.path.exists(p1): return p1
+            
+            # 2. Im aktuellen Arbeitsverzeichnis (Working Dir) suchen
+            p2 = os.path.join(cwd_dir, name)
+            if os.path.exists(p2): return p2
+            
         return None # Nicht gefunden
 
-    def run_local_tool(self, exe_name):
+    def run_local_tool(self, exe_path):
         """ Startet das gefundene Tool """
-        exe_path = self.get_tool_path(exe_name)
-        
         if exe_path and os.path.exists(exe_path):
             try: 
-                # Arbeitsverzeichnis (cwd) auf den Ordner der .exe setzen, damit config.json etc. gefunden werden
+                # Arbeitsverzeichnis (cwd) auf den Ordner der Datei setzen
                 subprocess.Popen([exe_path], cwd=os.path.dirname(exe_path))
             except Exception as e: 
-                utils.log.error(f"Konnte {exe_name} nicht starten: {e}")
-                messagebox.showerror("Fehler", f"Konnte {exe_name} nicht starten:\n{e}")
+                utils.log.error(f"Konnte Tool nicht starten: {e}")
+                messagebox.showerror("Fehler", f"Konnte Programm nicht starten:\n{e}")
         else: 
-            messagebox.showerror("Fehler", f"Datei '{exe_name}' nicht gefunden.\n\nBitte in den Einstellungen den korrekten Ordner angeben.")
+            messagebox.showerror("Fehler", "Die verknüpfte Datei wurde verschoben oder gelöscht.")
         
     # --- MULTI-FOLDER IMPORT WORKER ---
     def w_imp(self, s_input, d):

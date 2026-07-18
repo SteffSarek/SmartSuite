@@ -1,5 +1,5 @@
 # ==============================================================================
-# SMART_METRIC.PY - Metrische Analyse
+# SMART_METRIC.PY - Metrische Analyse & Pro-Diagnose
 # ==============================================================================
 import tkinter as tk
 import customtkinter as ctk
@@ -11,32 +11,26 @@ import subprocess
 import sys
 import numpy as np
 from tkinter import filedialog, messagebox
+from PIL import Image
 
 # Analysis Imports
 from astropy.io import fits
+from astropy.visualization import ZScaleInterval
 import sep
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
+from scipy.spatial import KDTree
 
 # Import Logic
 import smart_utils as utils
 
 # --- HELPER: KUGELSICHERES ENVIRONMENT FÜR SUBPROZESSE ---
 def get_clean_env():
-    """ 
-    Entfernt alle von PyInstaller gesetzten Python-Umgebungsvariablen 
-    und stellt den originalen Windows-PATH wieder her. 
-    Verhindert DLL-Konflikte (Error 3221225781) bei externen Programmen wie Siril.
-    """
     env = os.environ.copy()
-    
-    # 1. Alle Python & UI Variablen radikal löschen (inkl. TCL/TK)
     bad_keys = ["PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE", "PYTHONWARNINGS", "PYTHONIOENCODING", "TCL_LIBRARY", "TK_LIBRARY"]
     for k in bad_keys:
         env.pop(k, None)
-        
-    # 2. PATH extrem aggressiv bereinigen (Schutz vor Windows 8.3 Short-Names wie _MEI12~1)
     orig_path = env.get("PYINSTALLER_ORIG_PATH")
     if orig_path:
         env["PATH"] = orig_path
@@ -44,12 +38,10 @@ def get_clean_env():
         paths = env.get("PATH", "").split(os.pathsep)
         clean_paths = []
         for p in paths:
-            # Wir filtern ALLES raus, was das PyInstaller-Kürzel (_MEI) enthält (ignoriert Groß-/Kleinschreibung)
             if '_MEI' in p.upper():
                 continue
             clean_paths.append(p)
         env["PATH"] = os.pathsep.join(clean_paths)
-        
     return env
 
 
@@ -81,6 +73,148 @@ class ToolTip:
             self.tw.destroy()
             self.tw = None
 
+
+# --- FITS BLINKER (MINI-VIEWER) ---
+class FitsBlinkerWindow(ctk.CTkToplevel):
+    def __init__(self, parent, start_index):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.current_idx = start_index
+        self.load_counter = 0 # Verhindert, dass Bilder asynchron durcheinander laden
+        
+        self.title("FITS Blinker")
+        self.geometry("850x950")
+        self.attributes("-topmost", True)
+        
+        # Navigation
+        nav_frame = ctk.CTkFrame(self, fg_color="transparent")
+        nav_frame.pack(fill="x", pady=(10, 5), padx=20)
+        
+        self.btn_prev = ctk.CTkButton(nav_frame, text="< Zurück", width=80, fg_color="#34495e", command=self.go_prev)
+        self.btn_prev.pack(side="left")
+        
+        self.lbl_info = ctk.CTkLabel(nav_frame, text="", font=("Arial", 14, "bold"))
+        self.lbl_info.pack(side="left", expand=True)
+        
+        self.btn_next = ctk.CTkButton(nav_frame, text="Vor >", width=80, fg_color="#34495e", command=self.go_next)
+        self.btn_next.pack(side="right")
+        
+        # Bild
+        self.img_lbl = ctk.CTkLabel(self, text="Lade FITS...", font=("Arial", 14))
+        self.img_lbl.pack(expand=True, fill="both", padx=10, pady=5)
+        
+        # Aktion-Buttons
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=10)
+        
+        btn_keep = ctk.CTkButton(btn_frame, text="✅ Schließen", height=40, fg_color="#27ae60", hover_color="#2ecc71", command=self.destroy)
+        btn_keep.pack(side="left", expand=True, padx=20)
+        
+        btn_trash = ctk.CTkButton(btn_frame, text="🗑️ Bild aussortieren", height=40, fg_color="#c0392b", hover_color="#e74c3c", command=self.exclude_image)
+        btn_trash.pack(side="right", expand=True, padx=20)
+        
+        # Hotkeys
+        self.bind("<Left>", lambda e: self.go_prev())
+        self.bind("<Right>", lambda e: self.go_next())
+        
+        self.load_frame()
+        
+    def set_index(self, new_index):
+        self.current_idx = new_index
+        self.load_frame()
+
+    def go_prev(self):
+        if self.current_idx > 0:
+            self.current_idx -= 1
+            self.load_frame()
+
+    def go_next(self):
+        if self.current_idx < len(self.parent_app.filtered_results) - 1:
+            self.current_idx += 1
+            self.load_frame()
+
+    def load_frame(self):
+        if not self.parent_app.filtered_results:
+            self.destroy()
+            return
+            
+        # Bounds Check
+        if self.current_idx >= len(self.parent_app.filtered_results):
+            self.current_idx = len(self.parent_app.filtered_results) - 1
+        if self.current_idx < 0:
+            self.current_idx = 0
+
+        res = self.parent_app.filtered_results[self.current_idx]
+        
+        # 1. Update Parent Highlighting (Roter Punkt in allen Graphen)
+        self.parent_app.set_highlight(res['idx'])
+        
+        # 2. Update UI Text
+        self.title(f"FITS Blinker: {res['f']}")
+        self.lbl_info.configure(text=f"Frame {self.current_idx+1}/{len(self.parent_app.filtered_results)} | Score: {res['score']} | FWHM: {res['fw']:.2f}")
+        self.img_lbl.configure(text="Lade Bild...", image="")
+        
+        # 3. Bild laden (Multithreading)
+        self.load_counter += 1
+        threading.Thread(target=self._thread_load, args=(res['p'], self.load_counter), daemon=True).start()
+        
+    def _thread_load(self, path, counter):
+        try:
+            with fits.open(path) as hdul:
+                data = hdul[0].data if hdul[0].data is not None else hdul[1].data
+                
+            # ZScale Auto-Stretch
+            zscale = ZScaleInterval()
+            try:
+                vmin, vmax = zscale.get_limits(data)
+            except:
+                vmin, vmax = np.min(data), np.max(data)
+                
+            data_norm = np.clip((data - vmin) / (vmax - vmin), 0, 1)
+            data_8bit = (data_norm * 255).astype(np.uint8)
+            img = Image.fromarray(data_8bit)
+            
+            # Lanczos Skalierung
+            img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+            photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+            
+            # Nur updaten wenn es noch das aktuelle Bild ist!
+            if self.load_counter == counter:
+                self.after(0, lambda: self.img_lbl.configure(image=photo, text=""))
+                self.img_lbl.image = photo 
+        except Exception as e:
+            if self.load_counter == counter:
+                self.after(0, lambda: self.img_lbl.configure(text=f"Fehler beim Laden:\n{e}"))
+
+    def exclude_image(self):
+        folder_path = self.parent_app.folder_path
+        tdir = os.path.join(folder_path, "_Aussortiert")
+        os.makedirs(tdir, exist_ok=True)
+        
+        res = self.parent_app.filtered_results[self.current_idx]
+        src = res['p']
+        filename = res['f']
+        dst = os.path.join(tdir, filename)
+        
+        try:
+            shutil.move(src, dst)
+            self.parent_app.log_box.insert("end", f">> Manuell aussortiert (Blinker): {filename}\n")
+            self.parent_app.log_box.see("end")
+            
+            # Aus interner Liste löschen
+            self.parent_app.analysis_results = [r for r in self.parent_app.analysis_results if r['f'] != filename]
+            
+            # Graphen aktualisieren
+            self.parent_app.selected_frame_idx = None
+            self.parent_app.update_plots()
+            
+            # Das Listen-Array ist jetzt um 1 kleiner. self.current_idx zeigt jetzt automatisch auf das "nächste" Bild.
+            self.load_frame()
+            
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Konnte Bild nicht verschieben:\n{e}")
+
+
 # --- SIRIL FENSTER ---
 class SirilLogWindow(ctk.CTkToplevel):
     def __init__(self, parent, siril_path, work_dir, script_path):
@@ -90,13 +224,10 @@ class SirilLogWindow(ctk.CTkToplevel):
         self.siril_path = siril_path; self.work_dir = work_dir; self.script_path = script_path
         self.process = None
         if os.path.exists("smartsuite.ico"):
-            try: 
-                self.wm_iconbitmap("smartsuite.ico")
-            except Exception as e: 
-                utils.log.debug(f"Konnte Icon für SirilLogWindow nicht laden: {e}")
+            try: self.wm_iconbitmap("smartsuite.ico")
+            except: pass
                 
         self.after(100, self.lift); self.after(100, self.focus_force)
-        
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
         
         self.lbl_info = ctk.CTkLabel(self, text=f"Führe Skript aus: {os.path.basename(script_path)}", font=("Arial", 14, "bold"))
@@ -125,33 +256,23 @@ class SirilLogWindow(ctk.CTkToplevel):
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 kwargs['startupinfo'] = startupinfo
                 kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-            
-            # --- Nutze die neue Environment Helper Funktion ---
             kwargs['env'] = get_clean_env()
-            # ------------------------------------------------
             
-            utils.log.info(f"Starte Siril Prozess: {' '.join(cmd)}")
             self.process = subprocess.Popen(
                 cmd, cwd=self.work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
-                stdin=subprocess.DEVNULL, # NEU: Verhindert Handle-Konflikte (Crashes) bei Konsolen-Apps in Windows
-                text=True, encoding='utf-8', errors='replace', **kwargs
+                stdin=subprocess.DEVNULL, text=True, encoding='utf-8', errors='replace', **kwargs
             )
-            
             for line in iter(self.process.stdout.readline, ''): 
                 self.after(0, lambda l=line.strip(): (self.log_box.insert("end", l+"\n"), self.log_box.see("end")))
             
             rc = self.process.wait()
             if rc == 0:
-                utils.log.info("Siril Skript erfolgreich beendet.")
                 self.after(0, lambda: (self.log_box.insert("end", "\n--- FERTIG ---\n"), self.btn_close.configure(text="Fertig / Schließen", fg_color="#27ae60", command=self.destroy), self.btn_open.configure(state="normal", fg_color="#2980b9")))
             else:
-                utils.log.error(f"Siril Skript mit Fehler beendet. Return Code: {rc}")
                 self.after(0, lambda: (self.log_box.insert("end", f"\n--- FEHLER (Code {rc}) ---\n"), self.btn_close.configure(text="Schließen (Fehler)", fg_color="#e67e22")))
         
         except Exception as e:
-            err_msg = str(e) 
-            utils.log.exception(f"Kritischer Fehler beim Ausführen von Siril: {e}")
-            self.after(0, lambda err=err_msg: self.log_box.insert("end", f"CRITICAL: {err}\n"))
+            self.after(0, lambda err=str(e): self.log_box.insert("end", f"CRITICAL: {err}\n"))
 
     def open_dir(self):
         if not os.path.exists(self.work_dir): return
@@ -162,11 +283,8 @@ class SirilLogWindow(ctk.CTkToplevel):
     def close_window(self):
         if self.process and self.process.poll() is None:
             if messagebox.askyesno("?", "Siril läuft noch. Wirklich abbrechen?"):
-                try: 
-                    self.process.kill()
-                    utils.log.info("Siril Prozess durch User abgebrochen.")
-                except Exception as e: 
-                    utils.log.error(f"Konnte Siril Prozess nicht abbrechen: {e}")
+                try: self.process.kill()
+                except: pass
                 self.destroy()
         else: self.destroy()
 
@@ -176,19 +294,23 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
     def __init__(self, parent, folder_path):
         super().__init__(parent)
         self.title("Metrische Analyse & Smart Scoring")
-        self.geometry("1750x950+50+50")
+        self.geometry("1800x1000+50+50")
         self.folder_path = folder_path
         
         self.analysis_results = []
         self.filtered_results = []
+        
+        # --- UI State Variablen ---
         self.is_running = False
         self.stop_req = False
+        self.selected_frame_idx = None  # Speichert den globalen 'idx' des markierten Frames
+        self.current_pdata = None       # Zwischenspeicher für schnelles Redraw
+        self.current_mode = None
+        self.blinker_window = None      # Referenz auf den Blinker
         
         if os.path.exists("smartsuite.ico"):
-            try: 
-                self.wm_iconbitmap("smartsuite.ico")
-            except Exception as e: 
-                utils.log.debug(f"Konnte Icon für Metrik-Fenster nicht laden: {e}")
+            try: self.wm_iconbitmap("smartsuite.ico")
+            except: pass
             
         self.after(100, self.lift)
         self.grid_columnconfigure(0, weight=1)
@@ -211,20 +333,40 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         
         self.log_box.insert("end", f">> {len(self.scripts)} SSF-Skripte und {len(self.py_scripts)} Py-Skripte gefunden.\n"); self.log_box.see("end")
 
-        # 2. Graphen (Mitte) - 2x3 LAYOUT
-        self.g_frame = ctk.CTkFrame(self); self.g_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        plt.style.use('dark_background')
-        self.fig = Figure(figsize=(12, 7), dpi=100)
+        # 2. Graphen (Mitte) - Tabs
+        self.tabs = ctk.CTkTabview(self)
+        self.tabs.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         
+        self.tab_metrics = self.tabs.add("Standard Metriken")
+        self.tab_pro = self.tabs.add("Pro-Analyse (Tilt & Drift)")
+        
+        plt.style.use('dark_background')
+        
+        # TAB 1: STANDARD METRIKEN
+        self.fig = Figure(figsize=(12, 6), dpi=100)
         self.ax_fw = self.fig.add_subplot(231)
         self.ax_sn = self.fig.add_subplot(232)
         self.ax_ec = self.fig.add_subplot(233)
         self.ax_bk = self.fig.add_subplot(234)
         self.ax_st = self.fig.add_subplot(235) 
         self.ax_sc = self.fig.add_subplot(236) 
-        
         self.fig.subplots_adjust(hspace=0.4, wspace=0.25)
-        self.can = FigureCanvasTkAgg(self.fig, master=self.g_frame); self.can.draw(); self.can.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        self.can = FigureCanvasTkAgg(self.fig, master=self.tab_metrics)
+        self.can.draw()
+        self.can.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.can.mpl_connect('button_press_event', self.on_plot_click)
+
+        # TAB 2: PRO ANALYSE (TILT & DRIFT)
+        self.fig_pro = Figure(figsize=(12, 6), dpi=100)
+        self.ax_drift = self.fig_pro.add_subplot(121)
+        self.ax_tilt = self.fig_pro.add_subplot(122)
+        self.fig_pro.subplots_adjust(wspace=0.3)
+        
+        self.can_pro = FigureCanvasTkAgg(self.fig_pro, master=self.tab_pro)
+        self.can_pro.draw()
+        self.can_pro.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.can_pro.mpl_connect('button_press_event', self.on_drift_plot_click)
 
         # 3. Tools Frame (Steuerung)
         self.t_frame = ctk.CTkFrame(self, fg_color="#2b2b2b"); self.t_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
@@ -286,7 +428,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         self.btn_sort = ctk.CTkButton(self.s_frame, text="🧹 Ausführen", width=90, command=self.sort_files, fg_color="#c0392b", state="disabled")
         self.btn_sort.pack(side=tk.LEFT, padx=15)
 
-        # 4. Bottom Frame (CSV & Siril Tools 2-Zeilig)
+        # 4. Bottom Frame (CSV & Siril Tools)
         self.bot_frame = ctk.CTkFrame(self, fg_color="#1a1a1a", border_width=1, border_color="#3b8ed0")
         self.bot_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
         
@@ -298,7 +440,6 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         siril_container = ctk.CTkFrame(self.bot_frame, fg_color="transparent")
         siril_container.pack(side=tk.LEFT, fill="both", expand=True, padx=10, pady=5)
         
-        # Zeile 1: SSF Skripte (Klassisch / Background)
         r1 = ctk.CTkFrame(siril_container, fg_color="transparent")
         r1.pack(fill="x", pady=2)
         ctk.CTkLabel(r1, text="🚀 Siril CLI (Hintergrund):", font=("Arial", 11, "bold"), text_color="#3b8ed0", width=160, anchor="w").pack(side=tk.LEFT)
@@ -309,20 +450,15 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         
         self.btn_siril = ctk.CTkButton(r1, text="Start Skript", command=self.run_siril_gui, fg_color="#8e44ad", width=120)
         self.btn_siril.pack(side=tk.LEFT, padx=10)
-        ToolTip(self.btn_siril, "Führt das gewählte .ssf Skript unsichtbar im Hintergrund aus.")
         
-        # Zeile 2: Python Skripte & GUI
         r2 = ctk.CTkFrame(siril_container, fg_color="transparent")
         r2.pack(fill="x", pady=2)
         ctk.CTkLabel(r2, text="🖥 Siril GUI (Aktiv):", font=("Arial", 11, "bold"), text_color="#2980b9", width=160, anchor="w").pack(side=tk.LEFT)
         
         py_vals = ["(Nur GUI öffnen)"] + list(self.py_scripts.keys())
-        
         def on_py_combo_change(choice):
-            if choice == "(Nur GUI öffnen)":
-                self.btn_siril_app.configure(text="GUI Öffnen")
-            else:
-                self.btn_siril_app.configure(text="Py-Skript Ausführen")
+            if choice == "(Nur GUI öffnen)": self.btn_siril_app.configure(text="GUI Öffnen")
+            else: self.btn_siril_app.configure(text="Py-Skript Ausführen")
                 
         self.cmb_siril_py = ctk.CTkComboBox(r2, values=py_vals, width=300, command=on_py_combo_change)
         self.cmb_siril_py.pack(side=tk.LEFT, padx=5)
@@ -331,11 +467,49 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         self.btn_siril_app = ctk.CTkButton(r2, text="GUI Öffnen", command=self.open_siril_app, fg_color="#2980b9", width=140)
         self.btn_siril_app.pack(side=tk.LEFT, padx=10)
         
-        ToolTip(self.btn_siril_app, "Startet Siril im aktuellen Verzeichnis.\n- (Nur GUI): Öffnet die normale Programmoberfläche.\n- (Py-Skript): Führt das Skript im schnellen Batch-Modus aus (ohne GUI).")
-        
         if not self.siril_path: 
             self.btn_siril.configure(state="disabled", text="Siril fehlt")
             self.btn_siril_app.configure(state="disabled")
+
+    # --- CROSS-HIGHLIGHT LOGIK ---
+    def set_highlight(self, frame_idx):
+        """Wird vom Blinker aufgerufen, wenn ein Bild angezeigt wird."""
+        self.selected_frame_idx = frame_idx
+        if self.current_pdata:
+            self.draw_standard_graphs(self.current_pdata, self.current_mode)
+            self.draw_pro_graphs()
+
+    def on_plot_click(self, event):
+        if event.xdata is None or not self.filtered_results: return
+        try:
+            target_idx = int(round(event.xdata))
+            all_indices = [r['idx'] for r in self.filtered_results]
+            closest_local_i = np.argmin(np.abs(np.array(all_indices) - target_idx))
+            
+            if self.blinker_window is None or not self.blinker_window.winfo_exists():
+                self.blinker_window = FitsBlinkerWindow(self, closest_local_i)
+            else:
+                self.blinker_window.set_index(closest_local_i)
+                self.blinker_window.focus()
+        except Exception as e:
+            utils.log.debug(f"Klick-Event ignoriert: {e}")
+
+    def on_drift_plot_click(self, event):
+        if event.xdata is None or event.ydata is None or not self.filtered_results: return
+        if event.inaxes != self.ax_drift: return
+        try:
+            dx_vals = np.array([r['dx'] for r in self.filtered_results])
+            dy_vals = np.array([r['dy'] for r in self.filtered_results])
+            dists = (dx_vals - event.xdata)**2 + (dy_vals - event.ydata)**2
+            closest_local_i = np.argmin(dists)
+            
+            if self.blinker_window is None or not self.blinker_window.winfo_exists():
+                self.blinker_window = FitsBlinkerWindow(self, closest_local_i)
+            else:
+                self.blinker_window.set_index(closest_local_i)
+                self.blinker_window.focus()
+        except Exception as e:
+            utils.log.debug(f"Klick-Event Drift ignoriert: {e}")
 
     def open_current_folder(self):
         if not self.folder_path or not os.path.exists(self.folder_path): return
@@ -353,54 +527,25 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
             
     def open_siril_app(self):
         if not self.siril_path: return
-        
         gui_path = self.siril_path
-        if gui_path.lower().endswith("siril-cli.exe"): 
-            gui_path = gui_path[:-13] + "siril.exe"
-        elif gui_path.lower().endswith("siril-cli"): 
-            gui_path = gui_path[:-9] + "siril"
-            
+        if gui_path.lower().endswith("siril-cli.exe"): gui_path = gui_path[:-13] + "siril.exe"
+        elif gui_path.lower().endswith("siril-cli"): gui_path = gui_path[:-9] + "siril"
         work_dir = self.folder_path
-        if os.path.basename(work_dir).lower() == "lights": 
-            work_dir = os.path.dirname(work_dir)
-            
+        if os.path.basename(work_dir).lower() == "lights": work_dir = os.path.dirname(work_dir)
         selected_py = self.cmb_siril_py.get()
-            
         try:
-            # --- Nutze die neue Environment Helper Funktion ---
             clean_env = get_clean_env()
-            # ------------------------------------------------
-
             if selected_py and selected_py != "(Nur GUI öffnen)":
-                # Temporäre .ssf Datei erstellen
                 temp_ssf = os.path.join(work_dir, "_temp_run_py.ssf")
-                
-                # Vollen Pfad nutzen und Windows-Slashes umwandeln
                 full_py_path = self.py_scripts.get(selected_py, selected_py).replace('\\', '/')
-                
                 with open(temp_ssf, "w", encoding="utf-8") as f:
                     f.write("requires 1.4.0\n")
                     f.write(f"pyscript \"{full_py_path}\"\n")
-                
-                # --- DER TRICK: Wir nutzen unser schönes Fenster! ---
                 SirilLogWindow(self, self.siril_path, work_dir, temp_ssf)
-                
-                self.log_box.insert("end", f">> ⏳ Starte '{selected_py}' im Überwachungsfenster...\n")
-                self.log_box.see("end")
-                utils.log.info(f"Siril Py-Skript {selected_py} im Log-Fenster gestartet.")
-                
+                self.log_box.insert("end", f">> ⏳ Starte '{selected_py}'...\n")
             else:
-                if not os.path.exists(gui_path):
-                    messagebox.showerror("Fehler", f"Siril GUI nicht gefunden unter:\n{gui_path}")
-                    return
-                # Normaler GUI Start mit sauberem Environment
                 subprocess.Popen([gui_path, "-d", work_dir], cwd=work_dir, env=clean_env)
-                self.log_box.insert("end", f">> Siril GUI gestartet (Arbeitsverzeichnis gesetzt).\n")
-                self.log_box.see("end")
-                utils.log.info(f"Siril GUI manuell gestartet in {work_dir}")
-                
         except Exception as e:
-            utils.log.error(f"Konnte Siril GUI nicht starten: {e}")
             messagebox.showerror("Fehler", f"Start fehlgeschlagen:\n{e}")
 
     def run(self):
@@ -416,15 +561,19 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         try: 
             files = [f for f in os.listdir(self.folder_path) if f.lower().endswith(('.fit','.fits'))]
         except Exception as e: 
-            utils.log.error(f"Fehler beim Lesen des Metrik-Ordners {self.folder_path}: {e}")
+            utils.log.error(f"Fehler: {e}")
             files = []
             
         files.sort(); tot=len(files); self.analysis_results=[] 
         
         try: sep.set_extract_pixstack(20000000)
-        except Exception as e: utils.log.debug(f"Konnte sep pixstack nicht setzen: {e}")
+        except: pass
         try: sep.set_sub_object_limit(50000)
-        except Exception as e: utils.log.debug(f"Konnte sep sub_object_limit nicht setzen: {e}")
+        except: pass
+        
+        prev_coords = None
+        cum_dx = 0.0
+        cum_dy = 0.0
         
         for i, f in enumerate(files):
             if self.stop_req: 
@@ -440,7 +589,8 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 dev = str(hdr.get('TELESCOP', 'Unknown'))
                 
                 if dat is not None:
-                    step = 2 if dat.shape[1] > 2500 else 1
+                    img_h, img_w = dat.shape
+                    step = 2 if img_w > 2500 else 1
                     d_sm = dat[::step, ::step].astype(float)
                     
                     bkg = sep.Background(d_sm)
@@ -450,6 +600,8 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                     objs = sep.extract(sub, 5.0, err=bkg.globalrms, minarea=min_a)
                     
                     num = len(objs); fw = ec = sn = vi = 0
+                    dx = cum_dx; dy = cum_dy
+                    tilt_3x3 = np.full(9, np.nan)
                     
                     if num > 0:
                         fw = np.median(2 * np.sqrt(np.log(2) * (objs['a']**2 + objs['b']**2))) * step
@@ -460,22 +612,57 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                         b_max = np.max(b_img); b_min = np.min(b_img)
                         if b_max > 0: vi = ((b_max - b_min) / b_max) * 100.0
                         
+                        ox = objs['x'] * step
+                        oy = objs['y'] * step
+                        for sx in range(3):
+                            for sy in range(3):
+                                mask = (ox >= sx * (img_w/3)) & (ox < (sx+1) * (img_w/3)) & \
+                                       (oy >= sy * (img_h/3)) & (oy < (sy+1) * (img_h/3))
+                                sector_objs = objs[mask]
+                                if len(sector_objs) >= 3: 
+                                    fw_sec = np.median(2 * np.sqrt(np.log(2) * (sector_objs['a']**2 + sector_objs['b']**2))) * step
+                                    tilt_3x3[sy*3 + sx] = fw_sec
+                                    
+                        sorted_objs = np.sort(objs, order='flux')[::-1]
+                        top_stars = sorted_objs[:40] 
+                        current_coords = np.column_stack((top_stars['x'], top_stars['y']))
+                        
+                        if i == 0 or prev_coords is None:
+                            prev_coords = current_coords
+                        else:
+                            tree = KDTree(prev_coords)
+                            dists, indices = tree.query(current_coords)
+                            good_matches = dists < (50 / step) 
+                            
+                            if np.any(good_matches):
+                                matched_curr = current_coords[good_matches]
+                                matched_prev = prev_coords[indices[good_matches]]
+                                dx_arr = (matched_curr[:, 0] - matched_prev[:, 0]) * step
+                                dy_arr = (matched_curr[:, 1] - matched_prev[:, 1]) * step
+                                
+                                frame_dx = np.median(dx_arr)
+                                frame_dy = np.median(dy_arr)
+                                cum_dx += frame_dx
+                                cum_dy += frame_dy
+                                
+                            prev_coords = current_coords
+                            dx = cum_dx
+                            dy = cum_dy
+                            
                     else: fw=99.9; ec=1.0; sn=0; vi=0
                     
                     res = {
-                        "f":f, "p":p, 
+                        "idx": i, "f":f, "p":p, 
                         "fw":fw, "ec":ec, "bk":float(bkg.globalback), "st":num, 
-                        "sn":sn, "vi":vi, "score": 0,
+                        "sn":sn, "vi":vi, "score": 0, "dx": dx, "dy": dy, "tilt": tilt_3x3,
                         "obj":hdr.get('OBJECT',''), "exp":hdr.get('EXPTIME',''), 
                         "fil": flt, "dev": dev 
                     }
                     self.analysis_results.append(res)
                     
-                    sub_txt = " (Sub)" if step > 1 else ""
-                    msg = f"{i+1}: {flt}{sub_txt} | FWHM:{fw:.1f} | Ecc:{ec:.2f} | Stars:{num} | SNR:{sn:.1f}"
+                    msg = f"{i+1}: {flt} | FWHM:{fw:.1f} | Ecc:{ec:.2f} | SNR:{sn:.1f} | Stars:{num} | Drift X:{dx:.0f} Y:{dy:.0f}"
                     self.after(0, lambda m=msg, v=(i+1)/tot: (self.log_box.insert("end", m+"\n"), self.log_box.see("end"), self.prog.set(v), self.lbl_st.configure(text=f"Analysiere: {f}")))
             except Exception as e:
-                utils.log.warning(f"Fehler bei metrischer Analyse von Bild '{f}': {e}")
                 self.after(0, lambda err=e, fn=f: self.log_box.insert("end", f"Err {fn}: {err}\n"))
         
         if self.analysis_results:
@@ -515,19 +702,14 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 s_bk = norm(r['bk'], bk_bad, bk_good)
                 s_sn = norm(r['sn'], sn_bad, sn_good)
                 s_st = norm(r['st'], st_bad, st_good)
-
-                final_score = (s_fw * W_FW + s_sn * W_SN + s_bk * W_BK + s_ec * W_EC + s_st * W_ST) * 100
-                r['score'] = round(final_score, 1)
+                r['score'] = round((s_fw * W_FW + s_sn * W_SN + s_bk * W_BK + s_ec * W_EC + s_st * W_ST) * 100, 1)
                 
-            utils.log.info("Smart Scores mit Mindest-Toleranz berechnet.")
-
-        except Exception as e:
-            utils.log.error(f"Fehler bei Score-Berechnung: {e}")
+        except Exception as e: utils.log.error(f"Score-Berechnung: {e}")
 
     def finish_scan(self):
         self.is_running=False
         self.btn_run.configure(state="normal"); self.btn_stop.configure(state="disabled"); self.cmb_filter.configure(state="normal")
-        self.lbl_st.configure(text="Scan abgeschlossen.")
+        self.lbl_st.configure(text="Scan abgeschlossen. (Tipp: Klicke in die Graphen, um das Bild zu öffnen!)")
         if self.analysis_results: 
             self.btn_csv.configure(state="normal"); self.btn_sort.configure(state="normal")
             self.btn_ai.configure(state="normal")
@@ -539,9 +721,8 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         pdata = {"fwhm":[], "ecc":[], "bkg":[], "stars":[], "snr":[], "vig":[], "score":[], "idx":[]}
         nb_keys = ["LP", "DUO", "DB", "NB", "OIII", "HA", "SII", "H-ALPHA"]
         
-        for i, r in enumerate(self.analysis_results):
-            f_name = r['fil']
-            is_narrow = any(k in f_name for k in nb_keys)
+        for r in self.analysis_results:
+            is_narrow = any(k in r['fil'] for k in nb_keys)
             keep = (mode == "Alle") or (mode.startswith("Broadband") and not is_narrow) or (mode.startswith("Narrowband") and is_narrow)
                 
             if keep:
@@ -550,7 +731,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                     pdata["fwhm"].append(r['fw']); pdata["ecc"].append(r['ec']); pdata["bkg"].append(r['bk'])
                     pdata["stars"].append(r['st']); pdata["snr"].append(r['sn']); pdata["vig"].append(r['vi'])
                     pdata["score"].append(r.get('score', 0))
-                    pdata["idx"].append(i)
+                    pdata["idx"].append(r['idx'])
         
         if pdata["fwhm"]:
             try:
@@ -560,38 +741,43 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 self.e_st.delete(0,'end'); self.e_st.insert(0, f"{np.median(pdata['stars'])*0.8:.0f}")
                 self.e_sn.delete(0,'end'); self.e_sn.insert(0, f"{np.median(pdata['snr'])*0.7:.1f}")
                 self.e_sc.delete(0,'end'); self.e_sc.insert(0, "40") 
-            except Exception as e: 
-                utils.log.debug(f"GUI-Update der Median-Werte fehlgeschlagen: {e}")
+            except: pass
         
-        self.draw_graphs(pdata, mode)
+        self.current_pdata = pdata
+        self.current_mode = mode
+        
+        self.draw_standard_graphs(pdata, mode)
+        self.draw_pro_graphs()
 
-    def draw_graphs(self, data, suffix):
+    def draw_standard_graphs(self, data, suffix):
         def dr(ax, y, c, t, is_score=False):
             ax.clear()
             if not y: return
-            
             lw = 2 if is_score else 1
             ms = 4 if is_score else 3
             
-            ax.plot(data['idx'], y, 'o-', color=c, ms=ms, lw=lw)
+            # Basis-Daten zeichnen
+            ax.plot(data['idx'], y, 'o-', color=c, ms=ms, lw=lw, picker=True)
             med = np.median(y); sig = np.std(y)
             ax.axhline(med, c='white', ls='--', label=f"Med: {med:.2f}")
+            
+            # --- HIGHLIGHT: ROTER PUNKT ---
+            if self.selected_frame_idx is not None and self.selected_frame_idx in data['idx']:
+                local_i = data['idx'].index(self.selected_frame_idx)
+                # Dicker roter Punkt, Z-Order hoch damit er immer ganz oben liegt
+                ax.plot(data['idx'][local_i], y[local_i], 'ro', markersize=7, markeredgecolor='white', zorder=10)
             
             if is_score:
                 ax.axhline(60, c='#2ecc71', ls='-', alpha=0.8, label="Keep (>60)")
                 ax.axhline(40, c='#e74c3c', ls='-', alpha=0.8, label="Trash (<40)")
-                title_color = '#ffcc00'
-                fontsize = 10
                 ax.set_facecolor('#1a0505') 
             else:
                 ax.axhline(med+2*sig, c=c, ls=':', alpha=0.5)
                 ax.axhline(med-2*sig, c=c, ls=':', alpha=0.5)
                 ax.plot([], [], c=c, ls=':', label=f"±2σ: {med-2*sig:.1f}/{med+2*sig:.1f}")
-                title_color = 'white'
-                fontsize = 9
                 ax.set_facecolor('#000000') 
             
-            ax.set_title(t, color=title_color, fontsize=fontsize, fontweight='bold')
+            ax.set_title(t, color='#ffcc00' if is_score else 'white', fontsize=10 if is_score else 9, fontweight='bold')
             ax.legend(facecolor='#333', labelcolor='white', fontsize=6)
             ax.grid(True, alpha=0.2)
             ax.tick_params(colors='white', labelsize=7)
@@ -605,6 +791,57 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         
         self.fig.tight_layout(); self.can.draw()
 
+    def draw_pro_graphs(self):
+        self.ax_drift.clear()
+        self.ax_tilt.clear()
+        
+        if not self.filtered_results: return
+        
+        # --- DRIFT / DITHER SCATTERPLOT ---
+        dx_vals = [r['dx'] for r in self.filtered_results]
+        dy_vals = [r['dy'] for r in self.filtered_results]
+        
+        self.ax_drift.plot(dx_vals, dy_vals, 'o-', color='#3498db', alpha=0.5, markersize=3)
+        self.ax_drift.plot(dx_vals[0], dy_vals[0], 'go', markersize=8, label="Start (1. Bild)")
+        self.ax_drift.plot(dx_vals[-1], dy_vals[-1], 'ro', markersize=8, label="Ende (Letztes Bild)")
+        
+        # --- HIGHLIGHT: ROTER PUNKT IM DRIFT ---
+        if self.selected_frame_idx is not None:
+            for r in self.filtered_results:
+                if r['idx'] == self.selected_frame_idx:
+                    self.ax_drift.plot(r['dx'], r['dy'], 'ro', markersize=10, markeredgecolor='white', zorder=10)
+                    break
+        
+        self.ax_drift.set_title("Dither & Nachführungs-Drift", color='white', fontweight='bold')
+        self.ax_drift.set_xlabel("Pixel Drift X", color='gray')
+        self.ax_drift.set_ylabel("Pixel Drift Y", color='gray')
+        self.ax_drift.axhline(0, color='gray', linestyle='--', alpha=0.5)
+        self.ax_drift.axvline(0, color='gray', linestyle='--', alpha=0.5)
+        self.ax_drift.grid(True, alpha=0.2)
+        self.ax_drift.tick_params(colors='white')
+        self.ax_drift.legend(facecolor='#333', labelcolor='white')
+        self.ax_drift.set_facecolor('#0a0a0a')
+        
+        # --- 3x3 TILT INSPECTOR (HEATMAP) ---
+        tilt_arrays = [r['tilt'] for r in self.filtered_results if not np.all(np.isnan(r['tilt']))]
+        if tilt_arrays:
+            avg_tilt = np.nanmedian(np.array(tilt_arrays), axis=0).reshape((3, 3))
+            cax = self.ax_tilt.imshow(avg_tilt, cmap='RdYlGn_r', interpolation='nearest', origin='upper')
+            self.ax_tilt.set_title("Optischer Tilt & Backfocus (Ø FWHM)", color='white', fontweight='bold')
+            self.ax_tilt.set_xticks([])
+            self.ax_tilt.set_yticks([])
+            
+            for i in range(3):
+                for j in range(3):
+                    val = avg_tilt[i, j]
+                    if not np.isnan(val):
+                        self.ax_tilt.text(j, i, f"{val:.2f}", ha="center", va="center", color="white", fontweight='bold', fontsize=12)
+        else:
+            self.ax_tilt.set_title("Optischer Tilt (Zu wenig Sterne für 3x3)", color='gray')
+            self.ax_tilt.axis('off')
+            
+        self.fig_pro.tight_layout(); self.can_pro.draw()
+
     def export_csv(self):
         f = filedialog.asksaveasfilename(defaultextension=".csv")
         if f:
@@ -615,16 +852,13 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                     for r in self.analysis_results: 
                         w.writerow([r['f'], r['fil'], r['obj'], r['exp'], r.get('score', 0), f"{r['fw']:.4f}", f"{r['ec']:.4f}", f"{r['bk']:.2f}", r['st'], f"{r['sn']:.2f}"])
                 self.log_box.insert("end", f"CSV gespeichert.\n")
-                utils.log.info(f"Metrik-Analyse als CSV exportiert: {f}")
             except Exception as e: 
-                utils.log.error(f"Fehler beim Speichern der CSV: {e}")
                 messagebox.showerror("Fehler", f"{e}")
 
     def generate_ai_prompt(self):
         if not self.analysis_results: return
-        
         valid_res = [r for r in self.analysis_results if r['st'] > 0]
-        if not valid_res: messagebox.showinfo("Info", "Keine gültigen Daten."); return
+        if not valid_res: return
         
         fwhm_vals = [r['fw'] for r in valid_res]
         ecc_vals = [r['ec'] for r in valid_res]
@@ -639,56 +873,38 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
             devs = [r.get('dev', 'Unknown') for r in valid_res]
             from collections import Counter
             main_dev = Counter(devs).most_common(1)[0][0]
-        except Exception as e: 
-            utils.log.debug(f"Konnte häufigstes Teleskop nicht bestimmen: {e}")
-            main_dev = "Unbekannt"
+        except: main_dev = "Unbekannt"
 
         nb_keys = ["LP", "DUO", "DB", "NB", "OIII", "HA", "SII", "H-ALPHA", "UHC"]
         nb_count = sum(1 for r in self.analysis_results if any(k in r['fil'].upper() for k in nb_keys))
         bb_count = count - nb_count
         
         ana_dir = os.path.join(self.folder_path, "_Smart_Analysis")
-        try: 
-            os.makedirs(ana_dir, exist_ok=True)
-        except Exception as e: 
-            utils.log.error(f"Konnte Analyse-Ordner nicht erstellen: {e}")
+        try: os.makedirs(ana_dir, exist_ok=True)
+        except: pass
         
-        plot_filename = "Smart_Analyse_Graph.png"
-        plot_path = os.path.join(ana_dir, plot_filename)
-        
-        save_success = False
         try:
-            self.fig.savefig(plot_path)
+            self.fig.savefig(os.path.join(ana_dir, "Smart_Metriken.png"))
+            self.fig_pro.savefig(os.path.join(ana_dir, "Smart_Pro_Analyse.png"))
             save_success = True
-        except Exception as e:
-            utils.log.error(f"Fehler beim Speichern der KI-Grafik: {e}")
+        except: save_success = False
 
         prompt = f"""Ich habe {count} Astrofotos analysiert. 
 Genutztes Teleskop: {main_dev}
 
-Hier sind die Statistiken:
+Statistiken:
 - Durchschnitt Smart Score: {med_sc:.1f} / 100
 - Durchschnitt FWHM: {med_fw:.2f} (Pixel)
 - Durchschnitt Exzentrizität: {med_ec:.2f}
 - Durchschnitt SNR: {med_sn:.1f}
-- Anzahl Broadband (IR/UV): {bb_count}
-- Anzahl Narrowband (LP/Dual): {nb_count}
+- Anzahl Broadband: {bb_count} / Narrowband: {nb_count}
 
 Bitte analysiere diese Werte und hilf mir beim Aussortieren.
-1. Ist der FWHM Wert für dieses Teleskop in Ordnung?
-2. Deutet die Exzentrizität auf Nachführfehler oder Wind hin?
-3. Gibt es Auffälligkeiten beim SNR (ggf. Unterschied BB vs NB)?
+1. Ist der FWHM Wert in Ordnung?
+2. Deutet die Exzentrizität auf Nachführfehler hin?
+3. Welche harten Cut-Off-Werte würdest du für FWHM, Exzentrizität, SNR, und Hintergrund (Bkg) ansetzen, um die schlechtesten 15% auszusortieren?
 
-Zusätzlich habe ich einen relativen "Smart Score" (0-100) berechnet, der all diese Werte kombiniert.
-WICHTIG: Bitte gib mir konkrete Empfehlungen für das Aussortieren:
-Reicht es aus, stur nach "Score < ?" auszusortieren, oder sollte ich als Sicherheitsnetz noch harte Cut-Off-Werte für die schlechtesten ~15% definieren für:
-- FWHM > ?
-- Exzentrizität > ?
-- SNR < ?
-- Hintergrund (Bkg) > ?
-- Sternenanzahl (Stars) < ?
-
-Hier sind 5 zufällige Datenpunkte (CSV Format):
+Hier sind 5 zufällige Datenpunkte (CSV):
 Dateiname;Score;FWHM;Ecc;SNR;Bkg;Stars
 """
         import random
@@ -696,23 +912,17 @@ Dateiname;Score;FWHM;Ecc;SNR;Bkg;Stars
         for s in samples:
             prompt += f"{os.path.basename(s['f'])};{s.get('score',0)};{s['fw']:.2f};{s['ec']:.2f};{s['sn']:.1f};{s['bk']:.0f};{s['st']}\n"
             
-        prompt += "\nBitte begründe kurz deine Empfehlung."
-        
-        self.clipboard_clear()
-        self.clipboard_append(prompt)
+        self.clipboard_clear(); self.clipboard_append(prompt)
         
         if save_success:
             try:
                 if os.name == 'nt': os.startfile(ana_dir)
                 elif sys.platform == 'darwin': subprocess.Popen(['open', ana_dir])
                 else: subprocess.Popen(['xdg-open', ana_dir])
-            except Exception as e: 
-                utils.log.warning(f"Konnte Ordner {ana_dir} nicht öffnen: {e}")
+            except: pass
         
         msg = "KI Prompt kopiert!\n(Strg+V im Chat)."
-        if save_success:
-            msg += f"\n\nOrdner '{os.path.basename(ana_dir)}' geöffnet.\nBitte Grafik '{plot_filename}' in den Chat ziehen."
-            
+        if save_success: msg += f"\n\nOrdner geöffnet.\nBitte beide Grafiken in den Chat ziehen."
         messagebox.showinfo("Ready for AI", msg)
 
     def sort_files(self):
@@ -722,10 +932,8 @@ Dateiname;Score;FWHM;Ecc;SNR;Bkg;Stars
                 'st': float(self.e_st.get()), 'sn': float(self.e_sn.get()), 
                 'sc': float(self.e_sc.get()) 
             }
-        except Exception as e: 
-            utils.log.warning(f"Zahlenformatfehler bei Grenzwerten: {e}")
-            messagebox.showerror("Err", "Zahlenformat!")
-            return
+        except: 
+            messagebox.showerror("Err", "Zahlenformat!"); return
         
         tdir = os.path.join(self.folder_path, "_Aussortiert"); os.makedirs(tdir, exist_ok=True)
         cnt=0
@@ -745,11 +953,9 @@ Dateiname;Score;FWHM;Ecc;SNR;Bkg;Stars
                     try:
                         shutil.move(r['p'], os.path.join(tdir, r['f']))
                         l.write(f"{r['f']} -> {bad}\n"); cnt+=1
-                        self.log_box.insert("end", f"Verschoben: {r['f']} -> {bad}\n")
-                    except Exception as e: 
-                        utils.log.error(f"Fehler beim Verschieben von '{r['f']}': {e}")
-                        self.log_box.insert("end", f"Err: {e}\n")
+                    except Exception as e: self.log_box.insert("end", f"Err: {e}\n")
                     
         self.log_box.insert("end", f"--- {cnt} Bilder verschoben ---\n"); self.log_box.see("end")
         self.analysis_results = [r for r in self.analysis_results if not os.path.exists(os.path.join(tdir, r['f']))]
+        self.selected_frame_idx = None
         self.update_plots()

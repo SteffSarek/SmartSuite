@@ -80,7 +80,7 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
         super().__init__(parent)
         self.parent_app = parent
         self.current_idx = start_index
-        self.load_counter = 0 # Verhindert, dass Bilder asynchron durcheinander laden
+        self.load_counter = 0 
         
         self.title("FITS Blinker")
         self.geometry("850x950")
@@ -103,9 +103,13 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
         self.img_lbl = ctk.CTkLabel(self, text="Lade FITS...", font=("Arial", 14))
         self.img_lbl.pack(expand=True, fill="both", padx=10, pady=5)
         
+        # Warnungen (Wolken / Satelliten)
+        self.lbl_warn = ctk.CTkLabel(self, text="", font=("Arial", 14, "bold"), text_color="#e74c3c")
+        self.lbl_warn.pack(pady=(0, 5))
+        
         # Aktion-Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=10)
+        btn_frame.pack(fill="x", pady=5)
         
         btn_keep = ctk.CTkButton(btn_frame, text="✅ Schließen", height=40, fg_color="#27ae60", hover_color="#2ecc71", command=self.destroy)
         btn_keep.pack(side="left", expand=True, padx=20)
@@ -138,7 +142,6 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
             self.destroy()
             return
             
-        # Bounds Check
         if self.current_idx >= len(self.parent_app.filtered_results):
             self.current_idx = len(self.parent_app.filtered_results) - 1
         if self.current_idx < 0:
@@ -146,15 +149,18 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
 
         res = self.parent_app.filtered_results[self.current_idx]
         
-        # 1. Update Parent Highlighting (Roter Punkt in allen Graphen)
         self.parent_app.set_highlight(res['idx'])
         
-        # 2. Update UI Text
         self.title(f"FITS Blinker: {res['f']}")
         self.lbl_info.configure(text=f"Frame {self.current_idx+1}/{len(self.parent_app.filtered_results)} | Score: {res['score']} | FWHM: {res['fw']:.2f}")
+        
+        warn_text = ""
+        if res.get('is_cloud'): warn_text += "☁️ Dichte Wolken erkannt! "
+        if res.get('has_trail'): warn_text += "🛰️ Flugzeug/Satellit erkannt!"
+        self.lbl_warn.configure(text=warn_text)
+        
         self.img_lbl.configure(text="Lade Bild...", image="")
         
-        # 3. Bild laden (Multithreading)
         self.load_counter += 1
         threading.Thread(target=self._thread_load, args=(res['p'], self.load_counter), daemon=True).start()
         
@@ -163,7 +169,6 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
             with fits.open(path) as hdul:
                 data = hdul[0].data if hdul[0].data is not None else hdul[1].data
                 
-            # ZScale Auto-Stretch
             zscale = ZScaleInterval()
             try:
                 vmin, vmax = zscale.get_limits(data)
@@ -174,11 +179,9 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
             data_8bit = (data_norm * 255).astype(np.uint8)
             img = Image.fromarray(data_8bit)
             
-            # Lanczos Skalierung
             img.thumbnail((800, 800), Image.Resampling.LANCZOS)
             photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
             
-            # Nur updaten wenn es noch das aktuelle Bild ist!
             if self.load_counter == counter:
                 self.after(0, lambda: self.img_lbl.configure(image=photo, text=""))
                 self.img_lbl.image = photo 
@@ -201,14 +204,11 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
             self.parent_app.log_box.insert("end", f">> Manuell aussortiert (Blinker): {filename}\n")
             self.parent_app.log_box.see("end")
             
-            # Aus interner Liste löschen
             self.parent_app.analysis_results = [r for r in self.parent_app.analysis_results if r['f'] != filename]
             
-            # Graphen aktualisieren
             self.parent_app.selected_frame_idx = None
             self.parent_app.update_plots()
             
-            # Das Listen-Array ist jetzt um 1 kleiner. self.current_idx zeigt jetzt automatisch auf das "nächste" Bild.
             self.load_frame()
             
         except Exception as e:
@@ -303,10 +303,10 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         # --- UI State Variablen ---
         self.is_running = False
         self.stop_req = False
-        self.selected_frame_idx = None  # Speichert den globalen 'idx' des markierten Frames
-        self.current_pdata = None       # Zwischenspeicher für schnelles Redraw
+        self.selected_frame_idx = None  
+        self.current_pdata = None       
         self.current_mode = None
-        self.blinker_window = None      # Referenz auf den Blinker
+        self.blinker_window = None      
         
         if os.path.exists("smartsuite.ico"):
             try: self.wm_iconbitmap("smartsuite.ico")
@@ -473,7 +473,6 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
 
     # --- CROSS-HIGHLIGHT LOGIK ---
     def set_highlight(self, frame_idx):
-        """Wird vom Blinker aufgerufen, wenn ein Bild angezeigt wird."""
         self.selected_frame_idx = frame_idx
         if self.current_pdata:
             self.draw_standard_graphs(self.current_pdata, self.current_mode)
@@ -574,6 +573,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         prev_coords = None
         cum_dx = 0.0
         cum_dy = 0.0
+        recent_st = []  # Für Live-Cloud-Detection
         
         for i, f in enumerate(files):
             if self.stop_req: 
@@ -602,8 +602,20 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                     num = len(objs); fw = ec = sn = vi = 0
                     dx = cum_dx; dy = cum_dy
                     tilt_3x3 = np.full(9, np.nan)
+                    has_trail = False
+                    is_cloud = False
                     
+                    # --- Cloud Detection (Live) ---
+                    recent_st.append(num)
+                    if len(recent_st) > 15: recent_st.pop(0)
+                    if len(recent_st) >= 5:
+                        roll_st = np.median(recent_st[:-1])
+                        # Wenn Sterne um mehr als 50% zum laufenden Durchschnitt einbrechen
+                        if roll_st > 30 and num < (roll_st * 0.5): 
+                            is_cloud = True
+                            
                     if num > 0:
+                        # --- FWHM (Sehr schnelle Momente-Methode) ---
                         fw = np.median(2 * np.sqrt(np.log(2) * (objs['a']**2 + objs['b']**2))) * step
                         ec = np.median(np.sqrt(1 - (objs['b'] / objs['a'])**2))
                         sn_vals = objs['peak'] / bkg.globalrms
@@ -612,6 +624,14 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                         b_max = np.max(b_img); b_min = np.min(b_img)
                         if b_max > 0: vi = ((b_max - b_min) / b_max) * 100.0
                         
+                        # --- SCHNELLE Satelliten-Spur Erkennung (Ohne OpenCV!) ---
+                        # Ein Satellit ist extrem lang (>40 Pixel) und mindestens 8x länger als breit.
+                        elongation = objs['a'] / np.maximum(objs['b'], 0.5)
+                        trail_mask = (elongation > 8.0) & (objs['a'] * step > 40)
+                        if np.sum(trail_mask) >= 1:
+                            has_trail = True
+                        
+                        # --- TILT BERECHNUNG (3x3 Sektoren FWHM) ---
                         ox = objs['x'] * step
                         oy = objs['y'] * step
                         for sx in range(3):
@@ -623,6 +643,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                                     fw_sec = np.median(2 * np.sqrt(np.log(2) * (sector_objs['a']**2 + sector_objs['b']**2))) * step
                                     tilt_3x3[sy*3 + sx] = fw_sec
                                     
+                        # --- DITHER & DRIFT ---
                         sorted_objs = np.sort(objs, order='flux')[::-1]
                         top_stars = sorted_objs[:40] 
                         current_coords = np.column_stack((top_stars['x'], top_stars['y']))
@@ -656,11 +677,15 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                         "fw":fw, "ec":ec, "bk":float(bkg.globalback), "st":num, 
                         "sn":sn, "vi":vi, "score": 0, "dx": dx, "dy": dy, "tilt": tilt_3x3,
                         "obj":hdr.get('OBJECT',''), "exp":hdr.get('EXPTIME',''), 
-                        "fil": flt, "dev": dev 
+                        "fil": flt, "dev": dev, "is_cloud": is_cloud, "has_trail": has_trail
                     }
                     self.analysis_results.append(res)
                     
-                    msg = f"{i+1}: {flt} | FWHM:{fw:.1f} | Ecc:{ec:.2f} | SNR:{sn:.1f} | Stars:{num} | Drift X:{dx:.0f} Y:{dy:.0f}"
+                    icons = ""
+                    if has_trail: icons += "🛰️ "
+                    if is_cloud: icons += "☁️ "
+                    
+                    msg = f"{i+1}: {flt} {icons}| FWHM:{fw:.1f} | Ecc:{ec:.2f} | SNR:{sn:.1f} | Stars:{num} | Drift X:{dx:.0f} Y:{dy:.0f}"
                     self.after(0, lambda m=msg, v=(i+1)/tot: (self.log_box.insert("end", m+"\n"), self.log_box.see("end"), self.prog.set(v), self.lbl_st.configure(text=f"Analysiere: {f}")))
             except Exception as e:
                 self.after(0, lambda err=e, fn=f: self.log_box.insert("end", f"Err {fn}: {err}\n"))
@@ -702,7 +727,14 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 s_bk = norm(r['bk'], bk_bad, bk_good)
                 s_sn = norm(r['sn'], sn_bad, sn_good)
                 s_st = norm(r['st'], st_bad, st_good)
-                r['score'] = round((s_fw * W_FW + s_sn * W_SN + s_bk * W_BK + s_ec * W_EC + s_st * W_ST) * 100, 1)
+                
+                base_score = (s_fw * W_FW + s_sn * W_SN + s_bk * W_BK + s_ec * W_EC + s_st * W_ST) * 100
+                
+                # Harte Strafen für Problembilder (zieht den Graph tief nach unten!)
+                if r.get('is_cloud'): base_score = min(base_score, 30.0)
+                if r.get('has_trail'): base_score = max(0.0, base_score - 40.0)
+                
+                r['score'] = round(base_score, 1)
                 
         except Exception as e: utils.log.error(f"Score-Berechnung: {e}")
 
@@ -764,7 +796,6 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
             # --- HIGHLIGHT: ROTER PUNKT ---
             if self.selected_frame_idx is not None and self.selected_frame_idx in data['idx']:
                 local_i = data['idx'].index(self.selected_frame_idx)
-                # Dicker roter Punkt, Z-Order hoch damit er immer ganz oben liegt
                 ax.plot(data['idx'][local_i], y[local_i], 'ro', markersize=7, markeredgecolor='white', zorder=10)
             
             if is_score:
@@ -782,7 +813,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
             ax.grid(True, alpha=0.2)
             ax.tick_params(colors='white', labelsize=7)
         
-        dr(self.ax_fw, data['fwhm'], '#4da6ff', f"FWHM ({suffix})")
+        dr(self.ax_fw, data['fwhm'], '#4da6ff', f"FWHM (px) ({suffix})")
         dr(self.ax_sn, data['snr'], '#ff66cc', "SNR")
         dr(self.ax_ec, data['ecc'], '#1abc9c', "Exzentrizität")
         dr(self.ax_bk, data['bkg'], '#00cc66', "Hintergrund")

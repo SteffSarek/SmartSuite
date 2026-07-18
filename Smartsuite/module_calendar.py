@@ -292,9 +292,22 @@ class AstroCalendarFrame(ctk.CTkFrame):
             topos = wgs84.latlon(lat, lon, elevation_m=elevation)
             observer = earth + topos
             
-            print("Lade aktuelle ISS Stationsdaten...")
-            stations_url = 'https://celestrak.org/NORAD/elements/stations.txt'
-            satellites = sky_loader.tle_file(stations_url)
+            print("Prüfe Aktualität der ISS Stationsdaten...")
+            # --- DIE NEUE OFFIZIELLE CELESTRAK URL FÜR RAUMSTATIONEN ---
+            stations_url = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle'
+            
+            # --- Zwinge Skyfield zu einem Update (alle 12 Stunden) ---
+            # Da die URL sich geändert hat, speichern wir sie auch unter neuem Namen!
+            stations_file = os.path.join(utils.get_data_dir(), 'stations_new.txt')
+            do_reload = False
+            
+            if not os.path.exists(stations_file) or (time.time() - os.path.getmtime(stations_file)) > 43200:
+                do_reload = True
+                print("Lade frisches TLE von Celestrak herunter...")
+            
+            # Hier der entscheidende Trick: filename=stations_file sagt Skyfield, 
+            # wohin er die kryptische URL speichern soll!
+            satellites = sky_loader.tle_file(stations_url, filename=stations_file, reload=do_reload)
             iss = {sat.name: sat for sat in satellites}.get('ISS (ZARYA)')
             
             if not iss: return events

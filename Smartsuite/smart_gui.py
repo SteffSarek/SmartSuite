@@ -875,7 +875,7 @@ class SmartSuiteApp(ctk.CTk):
                     s = s.replace("MOSAIC|", "")
                 process_list.append((s, "GENERIC_MOSAIC" if is_mosaic else "GENERIC", os.path.basename(s)))
 
-        ui.log(f"\n--- Importiere aus {len(process_list)} erkannten Zielordnern ---")
+        ui.log(f"\n--- Importiere aus {len(process_list)} erkannten Quellordnern ---")
         
         # 2. FILTERN UND KOPIEREN (Für jeden gefundenen Ordner)
         for p_idx, (folder_path, mode, folder_name) in enumerate(process_list):

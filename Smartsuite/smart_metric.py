@@ -112,10 +112,14 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
         btn_frame.pack(fill="x", pady=5)
         
         btn_keep = ctk.CTkButton(btn_frame, text="✅ Schließen", height=40, fg_color="#27ae60", hover_color="#2ecc71", command=self.destroy)
-        btn_keep.pack(side="left", expand=True, padx=20)
+        btn_keep.pack(side="left", expand=True, padx=(20, 5))
+        
+        # --- NEU: Ordner öffnen Button ---
+        btn_explorer = ctk.CTkButton(btn_frame, text="📂 Im Ordner zeigen", height=40, fg_color="#34495e", hover_color="#2c3e50", command=self.show_in_explorer)
+        btn_explorer.pack(side="left", expand=True, padx=5)
         
         btn_trash = ctk.CTkButton(btn_frame, text="🗑️ Bild aussortieren", height=40, fg_color="#c0392b", hover_color="#e74c3c", command=self.exclude_image)
-        btn_trash.pack(side="right", expand=True, padx=20)
+        btn_trash.pack(side="right", expand=True, padx=(5, 20))
         
         # Hotkeys
         self.bind("<Left>", lambda e: self.go_prev())
@@ -188,6 +192,25 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
         except Exception as e:
             if self.load_counter == counter:
                 self.after(0, lambda: self.img_lbl.configure(text=f"Fehler beim Laden:\n{e}"))
+
+    def show_in_explorer(self):
+        if not self.parent_app.filtered_results: return
+        res = self.parent_app.filtered_results[self.current_idx]
+        file_path = os.path.normpath(res['p'])
+        
+        if not os.path.exists(file_path):
+            messagebox.showerror("Fehler", "Datei nicht gefunden!")
+            return
+            
+        try:
+            if os.name == 'nt': # Windows
+                subprocess.Popen(f'explorer /select,"{file_path}"')
+            elif sys.platform == 'darwin': # macOS
+                subprocess.Popen(['open', '-R', file_path])
+            else: # Linux
+                subprocess.Popen(['xdg-open', os.path.dirname(file_path)])
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Konnte Ordner nicht öffnen:\n{e}")
 
     def exclude_image(self):
         folder_path = self.parent_app.folder_path
@@ -425,6 +448,13 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
             ent.bind("<KeyRelease>", lambda e, v=var: auto_check(v))
             setattr(self, attr, ent)
             
+        # --- Mindest-Treffer Schwellenwert ---
+        ctk.CTkLabel(self.s_frame, text="Nötige Treffer:", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=(10, 2))
+        self.cmb_min_hits = ctk.CTkComboBox(self.s_frame, values=["1", "2", "3", "4", "5", "6"], width=60)
+        self.cmb_min_hits.pack(side=tk.LEFT, padx=(0, 10))
+        self.cmb_min_hits.set("1")
+        ToolTip(self.cmb_min_hits, "Wie viele der aktivierten Filter-Bedingungen müssen pro Bild GERISSEN werden, damit es in den Papierkorb fliegt?")
+            
         self.btn_sort = ctk.CTkButton(self.s_frame, text="🧹 Ausführen", width=90, command=self.sort_files, fg_color="#c0392b", state="disabled")
         self.btn_sort.pack(side=tk.LEFT, padx=15)
 
@@ -590,7 +620,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 
                 if dat is not None:
                     img_h, img_w = dat.shape
-                    step = 2 if img_w > 2500 else 1
+                    step = 2 if max(img_w, img_h) > 2500 else 1
                     d_sm = dat[::step, ::step].astype(float)
                     
                     bkg = sep.Background(d_sm)
@@ -610,7 +640,6 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                     if len(recent_st) > 15: recent_st.pop(0)
                     if len(recent_st) >= 5:
                         roll_st = np.median(recent_st[:-1])
-                        # Wenn Sterne um mehr als 50% zum laufenden Durchschnitt einbrechen
                         if roll_st > 30 and num < (roll_st * 0.5): 
                             is_cloud = True
                             
@@ -624,12 +653,17 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                         b_max = np.max(b_img); b_min = np.min(b_img)
                         if b_max > 0: vi = ((b_max - b_min) / b_max) * 100.0
                         
-                        # --- SCHNELLE Satelliten-Spur Erkennung (Ohne OpenCV!) ---
-                        # Ein Satellit ist extrem lang (>40 Pixel) und mindestens 8x länger als breit.
+                        # --- SCHNELLE Satelliten-Spur Erkennung (Über Winkel-Histogramm der SEP-Fragmente) ---
+                        # Da SEP Satellitenspuren oft in dutzende kleine "Sterne" zerhackt (was den Stern-Graph explodieren lässt),
+                        # suchen wir nicht nach einem riesigen Objekt, sondern nach vielen kleinen Objekten, die alle in exakt 
+                        # die gleiche Richtung zeigen!
                         elongation = objs['a'] / np.maximum(objs['b'], 0.5)
-                        trail_mask = (elongation > 8.0) & (objs['a'] * step > 40)
-                        if np.sum(trail_mask) >= 1:
-                            has_trail = True
+                        oval_mask = elongation > 1.5
+                        if np.sum(oval_mask) > 15:
+                            angles_deg = np.degrees(objs['theta'][oval_mask]) % 180.0
+                            counts, _ = np.histogram(angles_deg, bins=36, range=(0.0, 180.0))
+                            if np.max(counts) > 20: # Mehr als 20 Puzzleteile zeigen exakt in dieselbe Richtung
+                                has_trail = True
                         
                         # --- TILT BERECHNUNG (3x3 Sektoren FWHM) ---
                         ox = objs['x'] * step
@@ -685,7 +719,9 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                     if has_trail: icons += "🛰️ "
                     if is_cloud: icons += "☁️ "
                     
-                    msg = f"{i+1}: {flt} {icons}| FWHM:{fw:.1f} | Ecc:{ec:.2f} | SNR:{sn:.1f} | Stars:{num} | Drift X:{dx:.0f} Y:{dy:.0f}"
+                    sub_txt = " (Sub)" if step > 1 else ""
+                    
+                    msg = f"{i+1}: {flt}{sub_txt} {icons}| FWHM:{fw:.1f} | Ecc:{ec:.2f} | SNR:{sn:.1f} | Stars:{num} | Drift X:{dx:.0f} Y:{dy:.0f}"
                     self.after(0, lambda m=msg, v=(i+1)/tot: (self.log_box.insert("end", m+"\n"), self.log_box.see("end"), self.prog.set(v), self.lbl_st.configure(text=f"Analysiere: {f}")))
             except Exception as e:
                 self.after(0, lambda err=e, fn=f: self.log_box.insert("end", f"Err {fn}: {err}\n"))
@@ -732,7 +768,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 
                 # Harte Strafen für Problembilder (zieht den Graph tief nach unten!)
                 if r.get('is_cloud'): base_score = min(base_score, 30.0)
-                if r.get('has_trail'): base_score = max(0.0, base_score - 40.0)
+                if r.get('has_trail'): base_score = max(0.0, base_score - 20.0)
                 
                 r['score'] = round(base_score, 1)
                 
@@ -963,12 +999,13 @@ Dateiname;Score;FWHM;Ecc;SNR;Bkg;Stars
                 'st': float(self.e_st.get()), 'sn': float(self.e_sn.get()), 
                 'sc': float(self.e_sc.get()) 
             }
+            min_hits = int(self.cmb_min_hits.get())
         except: 
             messagebox.showerror("Err", "Zahlenformat!"); return
         
         tdir = os.path.join(self.folder_path, "_Aussortiert"); os.makedirs(tdir, exist_ok=True)
         cnt=0
-        self.log_box.insert("end", f"\n--- Sortiere ---\n")
+        self.log_box.insert("end", f"\n--- Sortiere (Mind. {min_hits} Treffer nötig) ---\n")
         
         with open(os.path.join(tdir, "_log.txt"), "a") as l:
             for r in self.filtered_results:
@@ -980,7 +1017,8 @@ Dateiname;Score;FWHM;Ecc;SNR;Bkg;Stars
                 if self.chk_st.get() and r['st'] < lims['st']: bad.append("Stars")
                 if self.chk_sn.get() and r['sn'] < lims['sn']: bad.append("SNR") 
                 
-                if bad:
+                # --- Prüfen, ob die Mindest-Trefferzahl erreicht wurde ---
+                if len(bad) >= min_hits:
                     try:
                         shutil.move(r['p'], os.path.join(tdir, r['f']))
                         l.write(f"{r['f']} -> {bad}\n"); cnt+=1

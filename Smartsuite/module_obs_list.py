@@ -941,7 +941,7 @@ class ObsListFrame(ctk.CTkFrame):
         ]
         daily_focus = focus_categories[day_of_year % len(focus_categories)]
         
-        prompt = "Du bist ein erfahrener Astronom und Astrofotograf.\n"
+        prompt = "Ich bin ein erfahrener Astronom und Astrofotograf.\n"
         prompt += "Meine Ausrüstung besteht aus folgenden Smart-Teleskopen: Seestar S30 Pro, Seestar S50 und Dwarf 3. Sie haben in der App einen Planungs-Modus.\n\n"
         prompt += f"Heute ist der {datetime.now().strftime('%d.%m.%Y')}. Mein Standort liegt auf dem Breitengrad {lat}° (Nordhalbkugel).\n"
         prompt += f"Die Wetter- und Mondbedingungen für heute Nacht lauten: {weather_str}\n\n"
@@ -952,6 +952,10 @@ class ObsListFrame(ctk.CTkFrame):
             prompt += "\n"
             
         prompt += "Da ich meinen Standort wählen kann (oder zwei Teleskope gleichzeitig nutze), habe ich hier ZWEI getrennte Pläne berechnet:\n\n"
+        
+        # Liste für die bereits verplanten Ziele
+        planned_target_names = []
+        
         if not night_plans.get("Süd") and not night_plans.get("Nord"): 
             prompt += "- (Plan konnte wegen Wetter/Höhe oder fehlender Ziele nicht erstellt werden)\n"
         else:
@@ -961,18 +965,34 @@ class ObsListFrame(ctk.CTkFrame):
                     for block in night_plans[hemi]:
                         comp = az_to_compass(block['az'])
                         prompt += f"- {block['start'].strftime('%H:%M')} bis {block['end'].strftime('%H:%M')}: {block['target']['name']} (Höhe: {int(block['alt'])}°, Richtung: {comp})\n"
+                        planned_target_names.append(block['target']['name'])
                     prompt += "\n"
+                    
+        # --- NEU: Komplette restliche Beobachtungsliste mitgeben ---
+        if hasattr(self, "last_targets") and self.last_targets:
+            unplanned_targets = [t for t in self.last_targets if t["name"] not in planned_target_names]
+            
+            if unplanned_targets:
+                prompt += "--- MEINE KOMPLETTE RESTLICHE BEOBACHTUNGSLISTE ---\n"
+                prompt += "Hier sind alle anderen Objekte, die ich mir gemerkt habe, die aber heute nicht im obigen Plan gelandet sind (z.B. weil sie zu tief stehen oder der Mond zu nah ist):\n"
+                for t in unplanned_targets:
+                    note = f" (Notiz: {t['note']})" if t.get('note') else ""
+                    # Wir geben der KI auch den Score mit, damit sie sieht, wie "gut" die App das Ziel bewertet hat
+                    score_str = f" [Auto-Score heute: {t.get('score', 0)}/100]" if t.get('score', -1) >= 0 else ""
+                    prompt += f"- {t['name']}{note}{score_str}\n"
+                prompt += "\n"
+        # -----------------------------------------------------------
                 
         prompt += "Bitte beantworte mir folgende Punkte exakt in dieser Reihenfolge:\n"
         prompt += "1. Lohnt sich Astrofotografie heute bei diesem Wetter und der Mondphase?\n"
-        prompt += "2. Schau dir meine beiden Pläne (Nord und Süd) an: Sind die Reihenfolgen sinnvoll gewählt, oder würdest du (wegen Lichtverschmutzung, Mond oder Objekttyp) etwas tauschen?\n"
+        prompt += "2. Schau dir meine beiden Pläne (Nord und Süd) an: Sind die Reihenfolgen sinnvoll gewählt, oder würdest du (wegen Lichtverschmutzung, Mond oder Objekttyp) etwas tauschen? Wirf auch einen Blick auf meine restliche Beobachtungsliste: Sollte ich vielleicht ein Ziel aus der restlichen Liste zwingend heute Nacht fotografieren, auch wenn der Auto-Plan es ignoriert hat?\n"
         prompt += "3. Aktuelles: Bitte nenne mir (nutze unbedingt deine Web-Suche) einen Kometen ODER eine frische Supernova, die ich in einen der Pläne integrieren könnte.\n"
         prompt += f"4. Dein 'Tipp des Tages': Ein Objekt, das heute gut passt und noch NICHT in meinen Plänen steht. Lege den Fokus heute explizit auf: {daily_focus}.\n"
         
         self.winfo_toplevel().clipboard_clear()
         self.winfo_toplevel().clipboard_append(prompt)
         
-        msg = "Der Prompt mit beiden Teleskop-Plänen wurde kopiert!\n\nMöchtest du ChatGPT jetzt im Browser öffnen?"
+        msg = "Der Prompt mit beiden Teleskop-Plänen und der restlichen Beobachtungsliste wurde kopiert!\n\nMöchtest du ChatGPT jetzt im Browser öffnen?"
         if messagebox.askyesno("KI-Prompt kopiert!", msg):
             import webbrowser
             webbrowser.open("https://chatgpt.com/")

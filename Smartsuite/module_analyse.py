@@ -6,6 +6,7 @@ import threading
 import csv
 import re
 from datetime import datetime, timedelta
+import pytz
 
 # Astropy Imports
 from astropy.io import fits
@@ -125,27 +126,45 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
             files = []
             
         cn = "Unknown"; obj = "Unknown"
+        local_tz = pytz.timezone('Europe/Berlin')
         
         for f in files:
             try:
                 with fits.open(os.path.join(d, f)) as h:
                     hdr = h[0].header
-                    dt_str = hdr.get('DATE-OBS', '').split('.')[0]
-                    try: dt = datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S')
-                    except Exception as e: 
-                        dt = datetime.min
-                    
-                    tmp = hdr.get('CCD-TEMP') or hdr.get('DET-TEMP') or hdr.get('TEMP')
-                    ra = hdr.get('RA'); dec = hdr.get('DEC')
                     
                     dev_raw = str(hdr.get('TELESCOP', 'Unknown'))
                     dev_up = dev_raw.upper()
                     
-                    # Hier war der Fehler beim Kopieren! 
                     if "S50" in dev_up: dev = "Seestar_S50"
                     elif "S30" in dev_up: dev = "Seestar_S30" 
                     elif "DWARF" in dev_up: dev = "Dwarf_3" if "3" in dev_up else "Dwarf_II"
                     else: dev = dev_raw
+
+                    # --- ZEITZONEN-KORREKTUR ---
+                    dt_str = hdr.get('DATE-OBS', '').split('.')[0]
+                    dt_utc = datetime.min
+                    dt_local = datetime.min
+                    
+                    try: 
+                        dt_parsed = datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S')
+                        
+                        if "DWARF" in dev_up:
+                            # Dwarf schreibt Lokalzeit in den Header
+                            dt_local = dt_parsed
+                            # Für Astropy (Höhenberechnung) wieder in UTC zurückrechnen
+                            dt_utc = local_tz.localize(dt_parsed).astimezone(pytz.utc).replace(tzinfo=None)
+                        else:
+                            # Seestar & Standard-Kameras schreiben UTC
+                            dt_utc = dt_parsed
+                            # Für UI & Session-Gruppierung in Lokalzeit umrechnen
+                            dt_local = pytz.utc.localize(dt_parsed).astimezone(local_tz).replace(tzinfo=None)
+                            
+                    except Exception as e: 
+                        pass
+                    
+                    tmp = hdr.get('CCD-TEMP') or hdr.get('DET-TEMP') or hdr.get('TEMP')
+                    ra = hdr.get('RA'); dec = hdr.get('DEC')
 
                     if cn == "Unknown" and ra and dec:
                         try:
@@ -158,7 +177,7 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
                     alt = "N/A"
                     direct_alt = hdr.get('OBJCTALT') or hdr.get('ALT-OBS') or hdr.get('CENTALT')
                     if direct_alt: alt = f"{float(direct_alt):.1f}"
-                    elif ra and dec and dt != datetime.min:
+                    elif ra and dec and dt_utc != datetime.min:
                         try:
                             lat = hdr.get('SITELAT') or hdr.get('LAT-OBS')
                             lon = hdr.get('SITELONG') or hdr.get('LONG-OBS')
@@ -167,7 +186,7 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
                             if lat and lon:
                                 loc = EarthLocation(lat=float(lat)*u.deg, lon=float(lon)*u.deg)
                                 coord = SkyCoord(ra=float(ra)*u.deg, dec=float(dec)*u.deg)
-                                alt_deg = coord.transform_to(AltAz(obstime=Time(dt), location=loc)).alt.deg
+                                alt_deg = coord.transform_to(AltAz(obstime=Time(dt_utc), location=loc)).alt.deg
                                 alt = f"{alt_deg:.1f}"
                         except Exception: pass
                     
@@ -175,9 +194,10 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
                         f, hdr.get('OBJECT'), dev, hdr.get('FILTER'), 
                         hdr.get('EXPTIME'), alt, hdr.get('GAIN'), hdr.get('EQMODE'), 
                         hdr.get('RA'), hdr.get('DEC'), hdr.get('FOCUSPOS'), tmp, 
-                        dt.strftime('%Y-%m-%d'), dt.strftime('%H:%M:%S')
+                        dt_local.strftime('%Y-%m-%d') if dt_local != datetime.min else "N/A", 
+                        dt_local.strftime('%H:%M:%S') if dt_local != datetime.min else "N/A"
                     )
-                    raw_data.append({"val": row, "dt": dt, "fil": str(hdr.get('FILTER')).upper(), "exp": float(hdr.get('EXPTIME') or 0), "tmp": tmp})
+                    raw_data.append({"val": row, "dt": dt_local, "fil": str(hdr.get('FILTER')).upper(), "exp": float(hdr.get('EXPTIME') or 0), "tmp": tmp})
             except Exception as e: pass
                 
         raw_data.sort(key=lambda x: x["dt"])
@@ -274,4 +294,11 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
         if cur: sessions.append(cur)
         for s in sessions:
             c = ctk.CTkFrame(self.sess_box, fg_color="#333333"); c.pack(fill="x", pady=2, padx=2)
-            ctk.CTkLabel(c, text=f"#{s['id']} | {s['start'].strftime('%Y-%m-%d %H:%M')} | {s['obj']} ({s['fil']}) - {s['cnt']} Bilder", font=("Consolas", 11)).pack(side=tk.LEFT, padx=10)
+            
+            # Format time explicitly to avoid datetime.min formatting errors
+            if s['start'] != datetime.min:
+                time_display = s['start'].strftime('%Y-%m-%d %H:%M')
+            else:
+                time_display = "Unbekannte Zeit"
+                
+            ctk.CTkLabel(c, text=f"#{s['id']} | {time_display} | {s['obj']} ({s['fil']}) - {s['cnt']} Bilder", font=("Consolas", 11)).pack(side=tk.LEFT, padx=10)

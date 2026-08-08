@@ -330,7 +330,7 @@ class SettingsWindow(ctk.CTkToplevel):
                 self.after(0, lambda: self.btn_update_ast.configure(text="⏳ Extrahiere helle Asteroiden..."))
                 with gzip.open(zip_file, "rt", encoding="utf-8") as f_in, open(txt_file, "w", encoding="utf-8") as f_out:
                     for i, line in enumerate(f_in):
-                        if i < 200: f_out.write(line)
+                        if i < 3000: f_out.write(line)
                             
                 if os.path.exists(zip_file): os.remove(zip_file)
                 self.after(0, lambda: self.btn_update_ast.configure(state="normal", text="🪨 Helle Asteroiden (Klassiker) neu laden"))

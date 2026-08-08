@@ -603,7 +603,9 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         prev_coords = None
         cum_dx = 0.0
         cum_dy = 0.0
-        recent_st = []  # Für Live-Cloud-Detection
+        recent_st = []  
+        
+        log_buffer = ""
         
         for i, f in enumerate(files):
             if self.stop_req: 
@@ -611,9 +613,17 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 
             p = os.path.join(self.folder_path, f)
             try:
-                with fits.open(p) as h: hdr=h[0].header; dat=h[0].data
-                if len(h)>1 and 'OBJECT' not in hdr: hdr = h[1].header
-                if dat is None and len(h)>1: dat=h[1].data
+                with fits.open(p, memmap=False, ignore_missing_end=True) as h: 
+                    hdr = h[0].header.copy() 
+                    raw_dat = h[0].data if h[0].data is not None else (h[1].data if len(h)>1 else None)
+                    
+                    if len(h) > 1 and 'OBJECT' not in hdr: 
+                        hdr = h[1].header.copy()
+                    
+                    if raw_dat is not None:
+                        dat = raw_dat.copy() 
+                    else:
+                        dat = None
                 
                 flt = str(hdr.get('FILTER', 'Unknown')).upper()
                 dev = str(hdr.get('TELESCOP', 'Unknown'))
@@ -621,51 +631,66 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 if dat is not None:
                     img_h, img_w = dat.shape
                     step = 2 if max(img_w, img_h) > 2500 else 1
-                    d_sm = dat[::step, ::step].astype(float)
+                    
+                    # --- DER ANTI-C-CRASH FIX ---
+                    # 1. Zwinge die Daten in ein C-lesbares Float32 Array
+                    d_sm = dat[::step, ::step].astype(np.float32)
+                    d_sm = np.ascontiguousarray(d_sm)
+                    d_sm = np.nan_to_num(d_sm)
+                    
+                    img_min = np.min(d_sm)
+                    img_max = np.max(d_sm)
+                    
+                    if (img_max - img_min) < 1e-4:
+                        raise ValueError("Bild hat keinen Kontrast (komplett flach/schwarz)")
                     
                     bkg = sep.Background(d_sm)
+                    
+                    # 2. Die Notbremse: Das Rauschen MUSS mindestens 0.05% des Bildkontrasts betragen.
+                    # Wenn bkg.globalrms nahe 0 ist, würde SEP Millionen Objekte finden und das UI einfrieren!
+                    min_allowed_rms = (img_max - img_min) * 0.0005
+                    safe_rms = max(bkg.globalrms, min_allowed_rms)
+                    
                     sub = d_sm - bkg
                     min_a = max(3, int(7 / (step*0.5))) 
                     
-                    objs = sep.extract(sub, 5.0, err=bkg.globalrms, minarea=min_a)
+                    # Wir nutzen safe_rms anstatt bkg.globalrms
+                    objs = sep.extract(sub, 5.0, err=safe_rms, minarea=min_a)
+                    # ----------------------------
                     
                     num = len(objs); fw = ec = sn = vi = 0
                     dx = cum_dx; dy = cum_dy
                     tilt_3x3 = np.full(9, np.nan)
                     has_trail = False
                     is_cloud = False
+                    is_noisy = False
                     
-                    # --- Cloud Detection (Live) ---
+                    if num > 5000:
+                        is_noisy = True
+                        is_cloud = True 
+                        num = 0         
+                        
                     recent_st.append(num)
                     if len(recent_st) > 15: recent_st.pop(0)
                     if len(recent_st) >= 5:
                         roll_st = np.median(recent_st[:-1])
-                        if roll_st > 30 and num < (roll_st * 0.5): 
+                        if (roll_st > 30 and num < (roll_st * 0.5)) or is_noisy: 
                             is_cloud = True
                             
                     if num > 0:
-                        # --- FWHM (Sehr schnelle Momente-Methode) ---
                         fw = np.median(2 * np.sqrt(np.log(2) * (objs['a']**2 + objs['b']**2))) * step
                         ec = np.median(np.sqrt(1 - (objs['b'] / objs['a'])**2))
-                        sn_vals = objs['peak'] / bkg.globalrms
+                        sn_vals = objs['peak'] / safe_rms
                         sn = np.median(sn_vals)
                         b_img = bkg.back()
                         b_max = np.max(b_img); b_min = np.min(b_img)
                         if b_max > 0: vi = ((b_max - b_min) / b_max) * 100.0
                         
-                        # --- SCHNELLE Satelliten-Spur Erkennung (Über Winkel-Histogramm der SEP-Fragmente) ---
-                        # Da SEP Satellitenspuren oft in dutzende kleine "Sterne" zerhackt (was den Stern-Graph explodieren lässt),
-                        # suchen wir nicht nach einem riesigen Objekt, sondern nach vielen kleinen Objekten, die alle in exakt 
-                        # die gleiche Richtung zeigen!
                         elongation = objs['a'] / np.maximum(objs['b'], 0.5)
-                        oval_mask = elongation > 1.5
-                        if np.sum(oval_mask) > 15:
-                            angles_deg = np.degrees(objs['theta'][oval_mask]) % 180.0
-                            counts, _ = np.histogram(angles_deg, bins=36, range=(0.0, 180.0))
-                            if np.max(counts) > 20: # Mehr als 20 Puzzleteile zeigen exakt in dieselbe Richtung
-                                has_trail = True
+                        trail_mask = (elongation > 10.0) & (objs['a'] * step > 100)
+                        if np.sum(trail_mask) >= 1:
+                            has_trail = True
                         
-                        # --- TILT BERECHNUNG (3x3 Sektoren FWHM) ---
                         ox = objs['x'] * step
                         oy = objs['y'] * step
                         for sx in range(3):
@@ -677,7 +702,6 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                                     fw_sec = np.median(2 * np.sqrt(np.log(2) * (sector_objs['a']**2 + sector_objs['b']**2))) * step
                                     tilt_3x3[sy*3 + sx] = fw_sec
                                     
-                        # --- DITHER & DRIFT ---
                         sorted_objs = np.sort(objs, order='flux')[::-1]
                         top_stars = sorted_objs[:40] 
                         current_coords = np.column_stack((top_stars['x'], top_stars['y']))
@@ -718,11 +742,28 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                     icons = ""
                     if has_trail: icons += "🛰️ "
                     if is_cloud: icons += "☁️ "
+                    if is_noisy: icons += "💥 "
                     
                     sub_txt = " (Sub)" if step > 1 else ""
-                    
                     msg = f"{i+1}: {flt}{sub_txt} {icons}| FWHM:{fw:.1f} | Ecc:{ec:.2f} | SNR:{sn:.1f} | Stars:{num} | Drift X:{dx:.0f} Y:{dy:.0f}"
-                    self.after(0, lambda m=msg, v=(i+1)/tot: (self.log_box.insert("end", m+"\n"), self.log_box.see("end"), self.prog.set(v), self.lbl_st.configure(text=f"Analysiere: {f}")))
+                    log_buffer += msg + "\n"
+                    
+                    # Alle 10 Bilder das GUI updaten (hält das Programm flüssig!)
+                    if i % 10 == 0 or i == tot - 1:
+                        def update_gui(b_txt, curr_i, filename):
+                            if not self.stop_req:
+                                self.log_box.insert("end", b_txt)
+                                self.log_box.see("end")
+                                self.prog.set((curr_i + 1) / tot)
+                                self.lbl_st.configure(text=f"Analysiere: {filename}")
+                        
+                        self.after(0, lambda b=log_buffer, c=i, fn=f: update_gui(b, c, fn))
+                        log_buffer = ""
+                    
+                    del dat, d_sm, sub, bkg, objs
+                    import gc
+                    if i % 20 == 0: gc.collect()
+                    
             except Exception as e:
                 self.after(0, lambda err=e, fn=f: self.log_box.insert("end", f"Err {fn}: {err}\n"))
         

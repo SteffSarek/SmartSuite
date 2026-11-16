@@ -4,25 +4,34 @@
 import sys
 import os
 
-# --- ABSOLUTER FIX FÜR PYINSTALLER .EXE ABSTÜRZE & LIVE-TERMINAL ---
-# Wir fangen alle Terminal-Ausgaben ab und leiten sie in unser eigenes System um.
+# --- FIX FÜR PYINSTALLER .EXE ABSTÜRZE & LIVE-TERMINAL ---
 class OutputRedirector:
-    def __init__(self):
+    def __init__(self, orig_stream=None):
         self.buffer = ""
         self.ui_callback = None
+        self.orig_stream = orig_stream
         
     def write(self, string):
         self.buffer += string
+        if len(self.buffer) > 50000:
+            self.buffer = self.buffer[-40000:]
+        if self.orig_stream is not None:
+            try:
+                self.orig_stream.write(string)
+            except Exception:
+                pass
         if self.ui_callback:
             self.ui_callback(string)
             
     def flush(self):
-        pass # Hier ist der "Flush"-Befehl, den Skyfield gesucht hat!
+        if self.orig_stream is not None:
+            try:
+                self.orig_stream.flush()
+            except Exception:
+                pass
 
 if not hasattr(sys, 'stdout_redirected'):
-    global_redirector = OutputRedirector()
-    if sys.stdout is None: sys.stdout = global_redirector
-    if sys.stderr is None: sys.stderr = global_redirector
+    global_redirector = OutputRedirector(sys.stdout)
     sys.stdout = global_redirector
     sys.stderr = global_redirector
     sys.stdout_redirected = True
@@ -42,14 +51,11 @@ import time
 import ephem
 from skyfield.api import Loader, wgs84
 
-# Wir zwingen Skyfield, im echten Programm-Ordner zu suchen
 import smart_utils as utils
 import module_obs_list
 
-# Lädt Ephemeriden in den neuen AstroData-Ordner
 sky_loader = Loader(utils.get_data_dir(), verbose=True)
 
-# Auch der Cache kommt dort rein
 CACHE_FILE = os.path.join(utils.get_data_dir(), "smartsuite_calendar_cache.json")
 CACHE_LIFETIME_SECONDS = 43200  # 12 Stunden
 
@@ -72,13 +78,12 @@ class AstroCalendarFrame(ctk.CTkFrame):
         self.btn_log = ctk.CTkButton(top_frame, text="🐞 Terminal", command=self.open_debug_log, fg_color="#34495e", hover_color="#2c3e50", width=100)
         self.btn_log.pack(side="right", padx=10)
         
-        # --- NEU: ISS FILTER CHECKBOX ---
-        self.show_iss_var = tk.BooleanVar(value=False) # Standardmäßig aus!
+        # --- ISS FILTER CHECKBOX ---
+        self.show_iss_var = tk.BooleanVar(value=False)
         self.chk_iss = ctk.CTkCheckBox(top_frame, text="Normale ISS-Überflüge zeigen", variable=self.show_iss_var)
         self.chk_iss.pack(side="right", padx=20)
         
-        # Sofortiges UI Update ohne Neuberechnung, wenn der Haken geklickt wird
-        self.show_iss_var.trace_add("write", lambda *args: self.render_calendar(self._calc_result) if self._calc_result else None)
+        self.show_iss_var.trace_add("write", lambda *args: self.render_calendar(self._calc_result) if self._calc_result is not None else None)
         
         info_frame = ctk.CTkFrame(self, fg_color="transparent")
         info_frame.pack(fill="x", padx=20, pady=0)
@@ -94,7 +99,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
         self.lbl_welcome = ctk.CTkLabel(self.scroll_frame, text="Lade Kalender...", text_color="gray")
         self.lbl_welcome.pack(pady=50)
 
-        # Direkt beim Start einmal laden!
         self.refresh_ui()
 
     # --- DAS EIGENE TERMINAL FENSTER ---
@@ -111,12 +115,14 @@ class AstroCalendarFrame(ctk.CTkFrame):
         
         def append_to_textbox(text):
             try:
-                textbox.insert("end", text)
-                textbox.see("end")
-            except: pass
+                if textbox.winfo_exists():
+                    textbox.insert("end", text)
+                    textbox.see("end")
+            except Exception: pass
             
         def thread_safe_append(text):
-            self.after(0, lambda: append_to_textbox(text))
+            if self.winfo_exists():
+                self.after(0, lambda: append_to_textbox(text))
             
         global_redirector.ui_callback = thread_safe_append
         
@@ -147,7 +153,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
         
         self.update_location_label()
         
-        # CACHE PRÜFEN (Im Haupt-Thread!)
+        # CACHE PRÜFEN
         if not force and os.path.exists(CACHE_FILE):
             try:
                 with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -156,6 +162,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     events = cache_data.get("events", [])
                     for ev in events:
                         ev["time"] = datetime.fromisoformat(ev["time"])
+                    self._calc_result = events
                     self.render_calendar(events)
                     return
             except Exception as e:
@@ -245,7 +252,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     else: 
                         if diff_deg < -90: lines.append(f"— {name} dominiert den Morgenhimmel und die zweite Nachthälfte.")
                         else: lines.append(f"— {name} taucht in der Morgendämmerung wieder auf ({const_name}).")
-        # --- NEU: Meteorschauer in den Monats-Tipps ---
         meteor_highlights = {
             1: "— 🌠 Anfang des Monats bringen die Quadrantiden ihr kurzes, aber oft kräftiges Maximum.",
             4: "— 🌠 Ende April sind die Lyriden aktiv (Sternbild Leier).",
@@ -269,11 +275,10 @@ class AstroCalendarFrame(ctk.CTkFrame):
         lat = float(cfg.get("default_lat", "51.16"))
         lon = float(cfg.get("default_lon", "10.45"))
         
-        # Sicheres Parsen der Höhe (Filtert Kommas, Text und leere Felder)
         try:
             ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
             elevation = float(ele_raw) if ele_raw else 0.0
-        except:
+        except Exception:
             elevation = 0.0
             
         local_tz = pytz.timezone('Europe/Berlin')
@@ -293,11 +298,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
             observer = earth + topos
             
             print("Prüfe Aktualität der ISS Stationsdaten...")
-            # --- DIE NEUE OFFIZIELLE CELESTRAK URL FÜR RAUMSTATIONEN ---
             stations_url = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle'
-            
-            # --- Zwinge Skyfield zu einem Update (alle 12 Stunden) ---
-            # Da die URL sich geändert hat, speichern wir sie auch unter neuem Namen!
             stations_file = os.path.join(utils.get_data_dir(), 'stations_new.txt')
             do_reload = False
             
@@ -305,8 +306,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 do_reload = True
                 print("Lade frisches TLE von Celestrak herunter...")
             
-            # Hier der entscheidende Trick: filename=stations_file sagt Skyfield, 
-            # wohin er die kryptische URL speichern soll!
             satellites = sky_loader.tle_file(stations_url, filename=stations_file, reload=do_reload)
             iss = {sat.name: sat for sat in satellites}.get('ISS (ZARYA)')
             
@@ -336,7 +335,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 sec = int((dt_end - dt_start).total_seconds())
                 if sec <= 0: continue
                 
-                # Grobes 1-Sekunden-Raster für den gesamten Überflug
                 t_arr_sec = dt_start.second + np.arange(sec)
                 t_arr = ts.utc(dt_start.year, dt_start.month, dt_start.day, 
                                dt_start.hour, dt_start.minute, t_arr_sec)
@@ -350,7 +348,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 moon_app = observer.at(t_arr).observe(moon).apparent()
                 ra_moon, dec_moon, _ = moon_app.radec()
                 
-                # Vektormathematik für Winkelabstand (grob)
                 cos_sun = np.sin(dec_iss.radians)*np.sin(dec_sun.radians) + np.cos(dec_iss.radians)*np.cos(dec_sun.radians)*np.cos(ra_iss.radians - ra_sun.radians)
                 sep_sun = np.degrees(np.arccos(np.clip(cos_sun, -1.0, 1.0)))
                 
@@ -362,12 +359,8 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 
                 is_transit = False
                 
-                # --- VERBESSERTE TRANSIT-BERECHNUNG (Micro-Search) ---
-                # Wenn wir im 1-Sekunden Raster näher als 1.5 Grad herankommen, 
-                # zoomen wir zeitlich extrem rein (0.05 Sekunden Schritte)!
                 def check_precise_transit(target_body, t_array, rough_sep_array, is_sun=True):
                     idx_min = np.argmin(rough_sep_array)
-                    # Wir nehmen +- 2 Sekunden um den gröbsten Minimalpunkt
                     t_fine_sec = t_arr_sec[idx_min] + np.arange(-2.0, 2.0, 0.05)
                     t_fine = ts.utc(dt_start.year, dt_start.month, dt_start.day, dt_start.hour, dt_start.minute, t_fine_sec)
                     
@@ -389,7 +382,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     min_sep, t_transit, alt, sep_array = check_precise_transit(sun, t_arr, sep_sun, True)
                     if alt > 5:
                         dt_local = t_transit.utc_datetime().replace(tzinfo=pytz.utc).astimezone(local_tz)
-                        # Radius der Sonne ist ca. 0.266 Grad. 
                         if min_sep <= 0.266:
                             duration = round(len(np.where(sep_array <= 0.266)[0]) * 0.05, 2)
                             events.append({"time": dt_local, "icon": "☀️", "title": "ISS Transit vor der Sonne!", "desc": f"Direkter Treffer! Dauer: {duration} Sekunden.\nMinimaler Abstand zum Zentrum: {round(min_sep, 3)}°.\nHöhe am Himmel: {int(alt)}°."})
@@ -421,7 +413,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
                                 dt_culm = t_culm.utc_datetime().replace(tzinfo=pytz.utc).astimezone(local_tz)
                                 dt_set = t_end.utc_datetime().replace(tzinfo=pytz.utc).astimezone(local_tz)
                                 
-                                # Himmelsrichtungen berechnen
                                 def get_dir(time_obj):
                                     az = (iss - topos).at(time_obj).altaz()[1].degrees
                                     dirs = ["N", "NNO", "NO", "ONO", "O", "OSO", "SO", "SSO", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
@@ -431,20 +422,15 @@ class AstroCalendarFrame(ctk.CTkFrame):
                                 dir_culm = get_dir(t_culm)
                                 dir_set = get_dir(t_end)
                                 
-                                # --- NEU: Sternbild am höchsten Punkt berechnen ---
-                                # Dafür brauchen wir ein klassisches ephem Objekt
-                                import ephem
                                 obs_ephem = ephem.Observer()
                                 cfg = utils.load_config()
                                 obs_ephem.lat = str(cfg.get("default_lat", "51.16"))
                                 obs_ephem.lon = str(cfg.get("default_lon", "10.45"))
                                 obs_ephem.date = t_culm.utc_datetime()
                                 
-                                # Wir nutzen die RA/DEC der ISS zum Kulminationszeitpunkt
                                 iss_topo = (iss - topos).at(t_culm)
                                 ra_iss, dec_iss, _ = iss_topo.radec()
                                 
-                                # Einen Dummy-Stern an diese Position setzen
                                 dummy = ephem.FixedBody()
                                 dummy._ra = ra_iss.radians
                                 dummy._dec = dec_iss.radians
@@ -459,7 +445,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
                                     'Sex': 'Sextant', 'UMa': 'Großer Bär', 'Peg': 'Pegasus', 'Cyg': 'Schwan',
                                     'Cas': 'Kassiopeia', 'Cep': 'Kepheus', 'Boo': 'Bärenhüter', 'Her': 'Herkules',
                                     'Lyr': 'Leier', 'Aql': 'Adler', 'CrB': 'Nördliche Krone', 'Dra': 'Drache',
-                                    'CVn': 'Nördliche Krone', 'Cam': 'Giraffe', 'And': 'Andromeda', 'Per': 'Perseus'
+                                    'CVn': 'Jagdhunde', 'Cam': 'Giraffe', 'And': 'Andromeda', 'Per': 'Perseus'
                                 }
                                 const_de = const_map.get(const_abbr, const_abbr)
                                 
@@ -478,10 +464,9 @@ class AstroCalendarFrame(ctk.CTkFrame):
             events.append({"time": datetime.now(local_tz), "icon": "⚠️", "title": "Fehler bei ISS-Berechnung", "desc": f"Technischer Fehler: {str(e)}"})
             return events
 
-    # --- HILFSFUNKTIONEN FÜR RICHTUNG UND STERNBILDER ---
     def _get_compass(self, az_rad):
         """Rechnet Bogenmaß in klassische Kompassrichtungen (N, NO, SW etc.) um"""
-        az_deg = math.degrees(az_rad)
+        az_deg = math.degrees(az_rad) % 360.0
         dirs = ["N", "NNO", "NO", "ONO", "O", "OSO", "SO", "SSO", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
         return dirs[int((az_deg + 11.25) / 22.5) % 16]
 
@@ -500,11 +485,10 @@ class AstroCalendarFrame(ctk.CTkFrame):
         observer.lat = lat_str
         observer.lon = lon_str
         
-        # Sicheres Parsen der Höhe
         try:
             ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
             observer.elevation = float(ele_raw) if ele_raw else 0.0
-        except:
+        except Exception:
             observer.elevation = 0.0
             
         moon = ephem.Moon()
@@ -524,7 +508,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
         start_ephem = ephem.Date(start_utc)
         end_ephem = ephem.Date(end_utc)
 
-        # --- 1. JAHRESZEITEN (Äquinoktien & Solstitien) ---
+        # --- 1. JAHRESZEITEN ---
         try:
             spring = self.ephem_to_local(ephem.next_vernal_equinox(str(current_year)), local_tz)
             events.append({"time": spring, "icon": "🌱", "title": "Frühlingsanfang", "desc": "Frühlings-Tag-und-Nachtgleiche. Tag und Nacht sind heute annähernd gleich lang."})
@@ -558,7 +542,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
             dt_local = self.ephem_to_local(fm, local_tz)
             month = dt_local.month
             
-            # 1. Supermond & Blaumond Logik
             if month in full_moons_this_month:
                 moon_title = f"Blaumond (Zweiter Vollmond im {dt_local.strftime('%B')})"
             else:
@@ -575,12 +558,10 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 moon_title = f"🌟 Supermond ({moon_names.get(month, '')})"
                 super_str = f" Der Mond ist heute besonders nah ({int(dist_km)} km) und wirkt riesig!"
 
-            # 2. Mondfinsternis Logik (Berechnung des Abstands zum Erdschatten)
             anti_sun_ra = (sun.ra + math.pi) % (2 * math.pi)
             anti_sun_dec = -sun.dec
             shadow_sep = math.degrees(ephem.separation((anti_sun_ra, anti_sun_dec), (moon.ra, moon.dec)))
             
-            # Ist der Mond während der Finsternis über dem Horizont?
             if shadow_sep < 1.6 and math.degrees(moon.alt) > -5:
                 if shadow_sep < 0.45:
                     events.append({"time": dt_local, "icon": "🔴", "title": "Totale Mondfinsternis (Blutmond!)", "desc": "Astronomisches Highlight! Der Mond wandert vollständig durch den Kernschatten der Erde und leuchtet blutrot."})
@@ -599,12 +580,9 @@ class AstroCalendarFrame(ctk.CTkFrame):
             nm = ephem.next_new_moon(curr)
             if nm > end_ephem: break
             
-            # Um zu prüfen, ob es eine lokal sichtbare Sonnenfinsternis gibt, 
-            # suchen wir den Punkt der größten Annäherung (± 6 Stunden um den Neumond in 15 Min. Schritten)
             min_sep = 999.0
             best_time = nm
             for offset in range(-24, 25):
-                # FIX: Das Ergebnis der Rechnung wieder explizit in ein ephem.Date umwandeln!
                 test_time = ephem.Date(nm + offset * 15 * ephem.minute)
                 observer.date = test_time
                 sun.compute(observer)
@@ -614,16 +592,13 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     min_sep = sep
                     best_time = test_time
             
-            # Rechnen mit der besten Zeit
             observer.date = best_time
             sun.compute(observer)
             moon.compute(observer)
             sun_r = math.degrees(sun.radius)
             moon_r = math.degrees(moon.radius)
             
-            # Wenn sich Mond und Sonne berühren UND die Sonne über dem Horizont steht
             if min_sep < (sun_r + moon_r) and math.degrees(sun.alt) > 0:
-                # Prozentuale Bedeckung berechnen
                 coverage = max(0, (sun_r + moon_r - min_sep) / (2 * sun_r)) * 100
                 dt_local = self.ephem_to_local(best_time, local_tz)
                 
@@ -687,7 +662,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 dt_local = seps[i][0].astimezone(local_tz).replace(hour=20, minute=0)
                 events.append({"time": dt_local, "icon": "⚪", "title": "Venus: Größte Elongation", "desc": "Maximaler scheinbarer Abstand zur Sonne."})
 
-        # --- 4a. MOND KONJUNKTIONEN (Mond trifft Planet) ---
+        # --- 4a. MOND KONJUNKTIONEN ---
         bright_planets_conj = [
             ("Merkur", ephem.Mercury(), "🟤"),
             ("Venus", ephem.Venus(), "⚪"),
@@ -732,8 +707,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     in_conj = False
                 curr += timedelta(hours=1)
 
-
-        # --- 4b. PLANETEN KONJUNKTIONEN (Alle Planeten) ---
+        # --- 4b. PLANETEN KONJUNKTIONEN ---
         planet_list = [
             ("Merkur", ephem.Mercury(), "🟤"), ("Venus", ephem.Venus(), "⚪"),
             ("Mars", ephem.Mars(), "🔴"), ("Jupiter", ephem.Jupiter(), "🟠"),
@@ -752,7 +726,6 @@ class AstroCalendarFrame(ctk.CTkFrame):
         for p1_name, p1_obj, p2_name, p2_obj, icon1, icon2 in planet_pairs:
             curr = start_utc
             in_conj = False
-            
             vis_start = None
             vis_end = None
             min_sep_overall = 999.0
@@ -846,7 +819,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
                 morning_time = obs_parade.previous_rising(ephem.Sun(), use_center=True)
                 evening_time = obs_parade.next_setting(ephem.Sun(), use_center=True)
                 check_times = [("Morgenhimmel", morning_time), ("Abendhimmel", evening_time)]
-            except: curr += 1; continue
+            except Exception: curr += 1; continue
             
             parade_found = False
             for time_name, t_check in check_times:
@@ -858,7 +831,7 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     if math.degrees(p_obj.alt) > 2:
                         visible_planets.append(p_name)
                         ra_list.append(math.degrees(p_obj.ra))
-                        az_list.append(p_obj.az) # Radian für Kompass speichern
+                        az_list.append(p_obj.az)
                         if is_naked_eye: naked_eye_count += 1
                             
                 if len(visible_planets) >= 5 or naked_eye_count >= 4:
@@ -869,8 +842,16 @@ class AstroCalendarFrame(ctk.CTkFrame):
                     
                     if spread < 160.0:
                         dt_local = self.ephem_to_local(t_check, local_tz)
-                        # Blickrichtung aus dem Minimum/Maximum Azimut ableiten
-                        dir_str = f"{self._get_compass(min(az_list))} bis {self._get_compass(max(az_list))}"
+                        az_deg = sorted(math.degrees(a) % 360.0 for a in az_list)
+                        if len(az_deg) >= 2:
+                            az_gaps = [az_deg[i+1] - az_deg[i] for i in range(len(az_deg)-1)]
+                            az_gaps.append(360.0 - az_deg[-1] + az_deg[0])
+                            max_gap_idx = az_gaps.index(max(az_gaps))
+                            arc_start = az_deg[(max_gap_idx + 1) % len(az_deg)]
+                            arc_end = az_deg[max_gap_idx]
+                            dir_str = f"{self._get_compass(math.radians(arc_start))} bis {self._get_compass(math.radians(arc_end))}"
+                        else:
+                            dir_str = self._get_compass(az_list[0])
                         
                         events.append({
                             "time": dt_local, "icon": "🌌", "title": f"Große Planetenparade ({time_name})", 
@@ -897,14 +878,13 @@ class AstroCalendarFrame(ctk.CTkFrame):
         ]
         
         for name, m, d, zhr, const_name, ra_str, dec_str, desc in meteor_showers:
-            peak_date = datetime(current_year, m, d, 23, 0, tzinfo=local_tz)
+            peak_date = local_tz.localize(datetime(current_year, m, d, 23, 0))
             observer.date = peak_date.astimezone(pytz.utc)
             
             moon.compute(observer)
             moon_phase = moon.phase
             cond = "Sehr gut" if moon_phase < 20 else "Befriedigend" if moon_phase < 60 else "Schlecht (Mond stört!)"
             
-            # Radianten berechnen (Ephem FixedBody)
             radiant = ephem.readdb(f"Radiant,f|S,{ra_str},{dec_str},0,2000")
             radiant.compute(observer)
             rad_alt = math.degrees(radiant.alt)
@@ -923,88 +903,87 @@ class AstroCalendarFrame(ctk.CTkFrame):
     # RENDERING & UI LOGIK
     # ==========================================
     def render_calendar(self, events):
-        for widget in self.scroll_frame.winfo_children(): widget.destroy()
-        months_de = ["", "Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"]
-        current_month = None
-        real_current_month = datetime.now().month
-        target_scroll_widget = None
-        
-        if not events: 
-            ctk.CTkLabel(self.scroll_frame, text="Keine Ereignisse gefunden.", text_color="gray").pack(pady=50)
-            return
+        try:
+            for widget in self.scroll_frame.winfo_children(): widget.destroy()
+            months_de = ["", "Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"]
+            current_month = None
+            real_current_month = datetime.now().month
+            target_scroll_widget = None
             
-        existing_list = module_obs_list.load_list()
-        existing_keys = [f"{x['iso_date']}_{x['title']}" for x in existing_list]
-        
-        # --- NEU: ISS FILTER ANWENDEN ---
-        filtered_events = []
-        for ev in events:
-            # Wenn der Titel "Heller ISS Überflug" ist und die Checkbox AUS ist, überspringen wir das Event.
-            # Transits (Sonne/Mond) haben andere Titel und bleiben immer sichtbar!
-            if ev["title"] == "Heller ISS Überflug" and not self.show_iss_var.get():
-                continue
-            filtered_events.append(ev)
-            
-        if not filtered_events:
-            ctk.CTkLabel(self.scroll_frame, text="Keine Ereignisse (oder alle durch Filter ausgeblendet).", text_color="gray").pack(pady=50)
-            return
-        
-        for ev in filtered_events:
-            if ev["time"].month != current_month:
-                current_month = ev["time"].month
-                year = ev["time"].year
-                m_frame = ctk.CTkFrame(self.scroll_frame, fg_color="transparent")
-                m_frame.pack(fill="x", pady=(20, 5))
-                ctk.CTkLabel(m_frame, text=f"{months_de[current_month]} {year}", font=("Arial", 16, "bold"), text_color="#3b8ed0").pack(anchor="w", padx=5)
-                ctk.CTkFrame(m_frame, height=2, fg_color="#3b8ed0").pack(fill="x", padx=5, pady=(2, 10))
+            if not events: 
+                ctk.CTkLabel(self.scroll_frame, text="Keine Ereignisse gefunden.", text_color="gray").pack(pady=50)
+                return
                 
-                summary_text = self._generate_month_summary(year, current_month)
-                if summary_text:
-                    info_card = ctk.CTkFrame(self.scroll_frame, fg_color="#1a2b3c", border_width=1, border_color="#2980b9", corner_radius=8)
-                    info_card.pack(fill="x", padx=5, pady=(0, 10))
-                    ctk.CTkLabel(info_card, text="📖 Himmelsjahr-Tipps:", font=("Arial", 14, "bold"), text_color="#3498db").pack(anchor="w", padx=10, pady=(10, 2))
-                    ctk.CTkLabel(info_card, text=summary_text, font=("Arial", 13, "bold"), text_color="#d1d8e0", justify="left").pack(anchor="w", padx=15, pady=(0, 10))
+            existing_list = module_obs_list.load_list()
+            existing_keys = [f"{x['iso_date']}_{x['title']}" for x in existing_list]
+            
+            filtered_events = []
+            for ev in events:
+                if ev["title"] == "Heller ISS Überflug" and not self.show_iss_var.get():
+                    continue
+                filtered_events.append(ev)
+                
+            if not filtered_events:
+                ctk.CTkLabel(self.scroll_frame, text="Keine Ereignisse (oder alle durch Filter ausgeblendet).", text_color="gray").pack(pady=50)
+                return
+            
+            for ev in filtered_events:
+                if ev["time"].month != current_month:
+                    current_month = ev["time"].month
+                    year = ev["time"].year
+                    m_frame = ctk.CTkFrame(self.scroll_frame, fg_color="transparent")
+                    m_frame.pack(fill="x", pady=(20, 5))
+                    ctk.CTkLabel(m_frame, text=f"{months_de[current_month]} {year}", font=("Arial", 16, "bold"), text_color="#3b8ed0").pack(anchor="w", padx=5)
+                    ctk.CTkFrame(m_frame, height=2, fg_color="#3b8ed0").pack(fill="x", padx=5, pady=(2, 10))
+                    
+                    summary_text = self._generate_month_summary(year, current_month)
+                    if summary_text:
+                        info_card = ctk.CTkFrame(self.scroll_frame, fg_color="#1a2b3c", border_width=1, border_color="#2980b9", corner_radius=8)
+                        info_card.pack(fill="x", padx=5, pady=(0, 10))
+                        ctk.CTkLabel(info_card, text="📖 Himmelsjahr-Tipps:", font=("Arial", 14, "bold"), text_color="#3498db").pack(anchor="w", padx=10, pady=(10, 2))
+                        ctk.CTkLabel(info_card, text=summary_text, font=("Arial", 13, "bold"), text_color="#d1d8e0", justify="left").pack(anchor="w", padx=15, pady=(0, 10))
 
-                if current_month == real_current_month and target_scroll_widget is None:
-                    target_scroll_widget = m_frame
+                    if current_month == real_current_month and target_scroll_widget is None:
+                        target_scroll_widget = m_frame
 
-            card = ctk.CTkFrame(self.scroll_frame, fg_color="#242424", border_width=1, border_color="#333333", corner_radius=8)
-            card.pack(fill="x", padx=5, pady=4)
-            
-            card_content = ctk.CTkFrame(card, fg_color="transparent")
-            card_content.pack(fill="both", expand=True, padx=5, pady=5)
-            
-            icon_lbl = ctk.CTkLabel(card_content, text=ev["icon"], font=("Segoe UI Emoji", 32))
-            icon_lbl.pack(side="left", padx=(15, 10), pady=10)
-            
-            iso_date = ev["time"].strftime("%Y-%m-%d")
-            disp_date = ev["time"].strftime("%d.%m.")
-            time_str = ev["time"].strftime("%H:%M")
-            
-            date_frame = ctk.CTkFrame(card_content, fg_color="transparent", width=70)
-            date_frame.pack(side="left", padx=10)
-            ctk.CTkLabel(date_frame, text=disp_date, font=("Arial", 14, "bold"), text_color="#3498db").pack()
-            ctk.CTkLabel(date_frame, text=time_str, font=("Arial", 12), text_color="gray").pack()
-            
-            info_frame = ctk.CTkFrame(card_content, fg_color="transparent")
-            info_frame.pack(side="left", fill="x", expand=True, padx=15, pady=10)
-            ctk.CTkLabel(info_frame, text=ev["title"], font=("Arial", 15, "bold"), anchor="w").pack(fill="x")
-            ctk.CTkLabel(info_frame, text=ev["desc"], font=("Arial", 12), text_color="gray", anchor="w", justify="left").pack(fill="x")
-            
-            ev_key = f"{iso_date}_{ev['title']}"
-            if ev_key in existing_keys:
-                btn_add = ctk.CTkButton(card_content, text="✔ Auf Liste", width=100, fg_color="#27ae60", state="disabled")
-            else:
-                btn_add = ctk.CTkButton(card_content, text="➕ Zur Liste", width=100, fg_color="#2980b9", hover_color="#3498db")
-                def on_add(e_info=ev, b=btn_add, i_d=iso_date, d_d=disp_date, t_s=time_str):
-                    module_obs_list.add_event(i_d, d_d, t_s, e_info["title"], e_info["desc"], e_info["icon"])
-                    b.configure(text="✔ Auf Liste", fg_color="#27ae60", state="disabled")
-                btn_add.configure(command=on_add)
-            btn_add.pack(side="right", padx=15, pady=10)
+                card = ctk.CTkFrame(self.scroll_frame, fg_color="#242424", border_width=1, border_color="#333333", corner_radius=8)
+                card.pack(fill="x", padx=5, pady=4)
+                
+                card_content = ctk.CTkFrame(card, fg_color="transparent")
+                card_content.pack(fill="both", expand=True, padx=5, pady=5)
+                
+                icon_lbl = ctk.CTkLabel(card_content, text=ev["icon"], font=("Segoe UI Emoji", 32))
+                icon_lbl.pack(side="left", padx=(15, 10), pady=10)
+                
+                iso_date = ev["time"].strftime("%Y-%m-%d")
+                disp_date = ev["time"].strftime("%d.%m.")
+                time_str = ev["time"].strftime("%H:%M")
+                
+                date_frame = ctk.CTkFrame(card_content, fg_color="transparent", width=70)
+                date_frame.pack(side="left", padx=10)
+                ctk.CTkLabel(date_frame, text=disp_date, font=("Arial", 14, "bold"), text_color="#3498db").pack()
+                ctk.CTkLabel(date_frame, text=time_str, font=("Arial", 12), text_color="gray").pack()
+                
+                info_frame = ctk.CTkFrame(card_content, fg_color="transparent")
+                info_frame.pack(side="left", fill="x", expand=True, padx=15, pady=10)
+                ctk.CTkLabel(info_frame, text=ev["title"], font=("Arial", 15, "bold"), anchor="w").pack(fill="x")
+                ctk.CTkLabel(info_frame, text=ev["desc"], font=("Arial", 12), text_color="gray", anchor="w", justify="left").pack(fill="x")
+                
+                ev_key = f"{iso_date}_{ev['title']}"
+                if ev_key in existing_keys:
+                    btn_add = ctk.CTkButton(card_content, text="✔ Auf Liste", width=100, fg_color="#27ae60", state="disabled")
+                else:
+                    btn_add = ctk.CTkButton(card_content, text="➕ Zur Liste", width=100, fg_color="#2980b9", hover_color="#3498db")
+                    def on_add(e_info=ev, b=btn_add, i_d=iso_date, d_d=disp_date, t_s=time_str):
+                        module_obs_list.add_event(i_d, d_d, t_s, e_info["title"], e_info["desc"], e_info["icon"])
+                        b.configure(text="✔ Auf Liste", fg_color="#27ae60", state="disabled")
+                    btn_add.configure(command=on_add)
+                btn_add.pack(side="right", padx=15, pady=10)
 
-        self.btn_calc.configure(state="normal")
-        self.is_calculating = False
-        if target_scroll_widget: self.after(100, lambda: self._do_auto_scroll(target_scroll_widget))
+            if target_scroll_widget: self.after(100, lambda: self._do_auto_scroll(target_scroll_widget))
+        finally:
+            self.btn_calc.configure(state="normal")
+            self.is_calculating = False
 
     def _do_auto_scroll(self, target_widget):
         self.update_idletasks()

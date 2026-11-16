@@ -3,11 +3,17 @@
 # ==============================================================================
 import sys
 import os
+import tempfile
 import traceback
 import tkinter as tk
 
 # 1. Sofort eine Log-Datei öffnen, noch bevor irgendetwas passiert
-log_file = open("CRASH_LOG.txt", "w")
+try:
+    base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+    log_file = open(os.path.join(base_dir, "CRASH_LOG.txt"), "w", encoding="utf-8")
+except Exception:
+    log_file = open(os.path.join(tempfile.gettempdir(), "SMARTSUITE_CRASH_LOG.txt"), "w", encoding="utf-8")
+
 log_file.write("Programm gestartet...\n")
 log_file.flush()
 
@@ -16,13 +22,13 @@ def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
 try:
     import version
     app_version = version.CURRENT_VERSION
-except:
+except Exception:
     app_version = "1.x"
 
 # ==============================================================================
@@ -93,9 +99,6 @@ try:
     lbl_status.config(text="Baue Benutzeroberfläche auf...")
     splash.update()
     
-    # --- DER NEUE, PERFEKTE MAGISCHE FIX ---
-    # Wir kappen die Verbindung zwischen Splash-Screen und den Variablen,
-    # LASSEN IHN ABER OFFEN, während das Hauptprogramm lädt!
     tk._default_root = None 
     
     if __name__ == "__main__":
@@ -105,7 +108,6 @@ try:
             start_mode = "analyze"
             start_path = sys.argv[2]
 
-        # Dies dauert ca. 2-3 Sekunden, ABER der Splash Screen ist noch da!
         app = smart_gui.SmartSuiteApp(version_string=app_version, start_mode=start_mode, start_path=start_path)
         
         # Schritt 3: Fertig!
@@ -113,17 +115,14 @@ try:
         lbl_status.config(text="Startklar!")
         splash.update()
         
-        # Jetzt, wo die Haupt-App zu 100% fertig im Hintergrund geladen ist, 
-        # löschen wir den Ladebildschirm.
         splash.destroy()
-        
-        # Und lassen das Hauptfenster nahtlos aufploppen!
         app.mainloop()
 
 except Exception as e:
     log_file.write("\n!!! KRITISCHER FEHLER AUFGETRETEN !!!\n")
     log_file.write(traceback.format_exc())
     try: splash.destroy() 
-    except: pass
+    except Exception: pass
 finally:
-    log_file.close()
+    try: log_file.close()
+    except Exception: pass

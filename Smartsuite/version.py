@@ -2,5 +2,5 @@
 # VERSION.PY - Zentrale Versionsverwaltung der SmartSuite
 # ==============================================================================
 
-# Ändere diese Zahl für ein neues Release (z.B. "1.1")
-CURRENT_VERSION = "1.2.1"
+# Ändere diese Zahl für ein neues Release (z.B. "1.5")
+CURRENT_VERSION = "1.2.4"

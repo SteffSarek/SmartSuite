@@ -22,7 +22,7 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
         # Frame initialisieren (ohne Hintergrundfarbe, damit es sich einfügt)
         super().__init__(parent, fg_color="transparent")
         
-        # Variablen (ehemals in SmartSuiteApp)
+        # Variablen
         self.ana_col = ("Datei", "Target", "Gerät", "Filter", "Exp", "Alt", "Gain", "EQM", "RA", "DEC", "Fokus", "Temp", "Datum", "Zeit")
         self.ana_data = []
         self.ana_chart_data = []
@@ -153,22 +153,22 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
                             # Dwarf schreibt Lokalzeit in den Header
                             dt_local = dt_parsed
                             # Für Astropy (Höhenberechnung) wieder in UTC zurückrechnen
-                            dt_utc = local_tz.localize(dt_parsed).astimezone(pytz.utc).replace(tzinfo=None)
+                            dt_utc = local_tz.localize(dt_parsed, is_dst=False).astimezone(pytz.utc).replace(tzinfo=None)
                         else:
                             # Seestar & Standard-Kameras schreiben UTC
                             dt_utc = dt_parsed
                             # Für UI & Session-Gruppierung in Lokalzeit umrechnen
                             dt_local = pytz.utc.localize(dt_parsed).astimezone(local_tz).replace(tzinfo=None)
                             
-                    except Exception as e: 
+                    except Exception: 
                         pass
                     
                     tmp = hdr.get('CCD-TEMP') or hdr.get('DET-TEMP') or hdr.get('TEMP')
                     ra = hdr.get('RA'); dec = hdr.get('DEC')
 
-                    if cn == "Unknown" and ra and dec:
+                    if cn == "Unknown" and ra is not None and dec is not None:
                         try:
-                            sc = SkyCoord(ra=ra*u.deg, dec=dec*u.deg)
+                            sc = SkyCoord(ra=float(ra)*u.deg, dec=float(dec)*u.deg)
                             cn = sc.get_constellation()
                         except Exception: pass
                             
@@ -176,8 +176,9 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
                     
                     alt = "N/A"
                     direct_alt = hdr.get('OBJCTALT') or hdr.get('ALT-OBS') or hdr.get('CENTALT')
-                    if direct_alt: alt = f"{float(direct_alt):.1f}"
-                    elif ra and dec and dt_utc != datetime.min:
+                    if direct_alt is not None:
+                        alt = f"{float(direct_alt):.1f}"
+                    elif ra is not None and dec is not None and dt_utc != datetime.min:
                         try:
                             lat = hdr.get('SITELAT') or hdr.get('LAT-OBS')
                             lon = hdr.get('SITELONG') or hdr.get('LONG-OBS')
@@ -198,7 +199,7 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
                         dt_local.strftime('%H:%M:%S') if dt_local != datetime.min else "N/A"
                     )
                     raw_data.append({"val": row, "dt": dt_local, "fil": str(hdr.get('FILTER')).upper(), "exp": float(hdr.get('EXPTIME') or 0), "tmp": tmp})
-            except Exception as e: pass
+            except Exception: pass
                 
         raw_data.sort(key=lambda x: x["dt"])
         if self.winfo_exists():
@@ -223,7 +224,7 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
 
     def ana_filt(self, *args):
         try: s = self.ana_s.get().lower()
-        except: s = self.search_var.get().lower()
+        except Exception: s = self.search_var.get().lower()
         self.tree.delete(*self.tree.get_children())
         display_idx = 0
         for row in self.ana_data:
@@ -241,7 +242,7 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
         f = filedialog.asksaveasfilename(defaultextension=".csv")
         if f:
             try:
-                with open(f, 'w', newline='') as c:
+                with open(f, 'w', newline='', encoding='utf-8') as c:
                     w = csv.writer(c, delimiter=';'); w.writerow(self.ana_col)
                     for i in self.tree.get_children(): w.writerow(self.tree.item(i)['values'])
             except Exception as e: 
@@ -252,8 +253,13 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
         
     def sort_tree(self, col, rev):
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
-        try: l.sort(key=lambda t: float(re.sub(r'[^\d.]', '', str(t[0]))), reverse=rev)
-        except Exception: l.sort(reverse=rev)
+        def sort_key(t):
+            s = re.sub(r'[^\d.-]', '', str(t[0]))
+            try:
+                return (0, float(s))
+            except ValueError:
+                return (1, str(t[0]).lower())
+        l.sort(key=sort_key, reverse=rev)
         for i, (v, k) in enumerate(l): self.tree.move(k, '', i); self.tree.item(k, tags=('odd' if i % 2 else 'even',))
         self.tree.heading(col, command=lambda: self.sort_tree(col, not rev))
 
@@ -295,7 +301,6 @@ class DeepSkyAnalyseFrame(ctk.CTkFrame):
         for s in sessions:
             c = ctk.CTkFrame(self.sess_box, fg_color="#333333"); c.pack(fill="x", pady=2, padx=2)
             
-            # Format time explicitly to avoid datetime.min formatting errors
             if s['start'] != datetime.min:
                 time_display = s['start'].strftime('%Y-%m-%d %H:%M')
             else:

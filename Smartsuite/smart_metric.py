@@ -9,6 +9,7 @@ import shutil
 import csv
 import subprocess
 import sys
+import gc
 import numpy as np
 from tkinter import filedialog, messagebox
 from PIL import Image
@@ -114,7 +115,6 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
         btn_keep = ctk.CTkButton(btn_frame, text="✅ Schließen", height=40, fg_color="#27ae60", hover_color="#2ecc71", command=self.destroy)
         btn_keep.pack(side="left", expand=True, padx=(20, 5))
         
-        # --- NEU: Ordner öffnen Button ---
         btn_explorer = ctk.CTkButton(btn_frame, text="📂 Im Ordner zeigen", height=40, fg_color="#34495e", hover_color="#2c3e50", command=self.show_in_explorer)
         btn_explorer.pack(side="left", expand=True, padx=5)
         
@@ -172,26 +172,40 @@ class FitsBlinkerWindow(ctk.CTkToplevel):
         try:
             with fits.open(path) as hdul:
                 data = hdul[0].data if hdul[0].data is not None else hdul[1].data
+
+            if data is None:
+                raise ValueError("Keine Bilddaten im FITS gefunden.")
+
+            if data.ndim == 3:
+                data = np.mean(data, axis=0 if data.shape[0] in (3, 4) else -1)
                 
             zscale = ZScaleInterval()
             try:
                 vmin, vmax = zscale.get_limits(data)
-            except:
-                vmin, vmax = np.min(data), np.max(data)
-                
-            data_norm = np.clip((data - vmin) / (vmax - vmin), 0, 1)
-            data_8bit = (data_norm * 255).astype(np.uint8)
+            except Exception:
+                vmin, vmax = float(np.min(data)), float(np.max(data))
+
+            if vmax <= vmin:
+                data_8bit = np.zeros(data.shape, dtype=np.uint8)
+            else:
+                data_norm = np.clip((data - vmin) / (vmax - vmin), 0, 1)
+                data_8bit = (data_norm * 255).astype(np.uint8)
+
             img = Image.fromarray(data_8bit)
-            
             img.thumbnail((800, 800), Image.Resampling.LANCZOS)
-            photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-            
-            if self.load_counter == counter:
-                self.after(0, lambda: self.img_lbl.configure(image=photo, text=""))
-                self.img_lbl.image = photo 
+
+            def apply_image():
+                if self.load_counter == counter and self.winfo_exists():
+                    photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+                    self.img_lbl.configure(image=photo, text="")
+                    self.img_lbl.image = photo
+
+            self.after(0, apply_image)
         except Exception as e:
-            if self.load_counter == counter:
-                self.after(0, lambda: self.img_lbl.configure(text=f"Fehler beim Laden:\n{e}"))
+            def show_err():
+                if self.load_counter == counter and self.winfo_exists():
+                    self.img_lbl.configure(text=f"Fehler beim Laden:\n{e}")
+            self.after(0, show_err)
 
     def show_in_explorer(self):
         if not self.parent_app.filtered_results: return
@@ -248,7 +262,7 @@ class SirilLogWindow(ctk.CTkToplevel):
         self.process = None
         if os.path.exists("smartsuite.ico"):
             try: self.wm_iconbitmap("smartsuite.ico")
-            except: pass
+            except Exception: pass
                 
         self.after(100, self.lift); self.after(100, self.focus_force)
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
@@ -270,6 +284,11 @@ class SirilLogWindow(ctk.CTkToplevel):
         
         threading.Thread(target=self.run_process, daemon=True).start()
 
+    def _safe_append(self, text):
+        if self.winfo_exists():
+            self.log_box.insert("end", text)
+            self.log_box.see("end")
+
     def run_process(self):
         cmd = [self.siril_path, "-d", self.work_dir, "-s", self.script_path]
         try:
@@ -286,16 +305,25 @@ class SirilLogWindow(ctk.CTkToplevel):
                 stdin=subprocess.DEVNULL, text=True, encoding='utf-8', errors='replace', **kwargs
             )
             for line in iter(self.process.stdout.readline, ''): 
-                self.after(0, lambda l=line.strip(): (self.log_box.insert("end", l+"\n"), self.log_box.see("end")))
+                self.after(0, lambda l=line.strip(): self._safe_append(l + "\n"))
             
             rc = self.process.wait()
             if rc == 0:
-                self.after(0, lambda: (self.log_box.insert("end", "\n--- FERTIG ---\n"), self.btn_close.configure(text="Fertig / Schließen", fg_color="#27ae60", command=self.destroy), self.btn_open.configure(state="normal", fg_color="#2980b9")))
+                def on_done():
+                    if self.winfo_exists():
+                        self._safe_append("\n--- FERTIG ---\n")
+                        self.btn_close.configure(text="Fertig / Schließen", fg_color="#27ae60", command=self.destroy)
+                        self.btn_open.configure(state="normal", fg_color="#2980b9")
+                self.after(0, on_done)
             else:
-                self.after(0, lambda: (self.log_box.insert("end", f"\n--- FEHLER (Code {rc}) ---\n"), self.btn_close.configure(text="Schließen (Fehler)", fg_color="#e67e22")))
+                def on_err():
+                    if self.winfo_exists():
+                        self._safe_append(f"\n--- FEHLER (Code {rc}) ---\n")
+                        self.btn_close.configure(text="Schließen (Fehler)", fg_color="#e67e22")
+                self.after(0, on_err)
         
         except Exception as e:
-            self.after(0, lambda err=str(e): self.log_box.insert("end", f"CRITICAL: {err}\n"))
+            self.after(0, lambda err=str(e): self._safe_append(f"CRITICAL: {err}\n"))
 
     def open_dir(self):
         if not os.path.exists(self.work_dir): return
@@ -307,7 +335,7 @@ class SirilLogWindow(ctk.CTkToplevel):
         if self.process and self.process.poll() is None:
             if messagebox.askyesno("?", "Siril läuft noch. Wirklich abbrechen?"):
                 try: self.process.kill()
-                except: pass
+                except Exception: pass
                 self.destroy()
         else: self.destroy()
 
@@ -333,7 +361,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         
         if os.path.exists("smartsuite.ico"):
             try: self.wm_iconbitmap("smartsuite.ico")
-            except: pass
+            except Exception: pass
             
         self.after(100, self.lift)
         self.grid_columnconfigure(0, weight=1)
@@ -448,7 +476,6 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
             ent.bind("<KeyRelease>", lambda e, v=var: auto_check(v))
             setattr(self, attr, ent)
             
-        # --- Mindest-Treffer Schwellenwert ---
         ctk.CTkLabel(self.s_frame, text="Nötige Treffer:", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=(10, 2))
         self.cmb_min_hits = ctk.CTkComboBox(self.s_frame, values=["1", "2", "3", "4", "5", "6"], width=60)
         self.cmb_min_hits.pack(side=tk.LEFT, padx=(0, 10))
@@ -596,9 +623,9 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         files.sort(); tot=len(files); self.analysis_results=[] 
         
         try: sep.set_extract_pixstack(20000000)
-        except: pass
+        except Exception: pass
         try: sep.set_sub_object_limit(50000)
-        except: pass
+        except Exception: pass
         
         prev_coords = None
         cum_dx = 0.0
@@ -609,7 +636,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         
         for i, f in enumerate(files):
             if self.stop_req: 
-                self.after(0, lambda: self.log_box.insert("end", "Abbruch durch User.\n")); break
+                self.after(0, lambda: self.log_box.insert("end", "Abbruch durch User.\n") if self.winfo_exists() else None); break
                 
             p = os.path.join(self.folder_path, f)
             try:
@@ -629,11 +656,11 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 dev = str(hdr.get('TELESCOP', 'Unknown'))
                 
                 if dat is not None:
+                    if dat.ndim == 3:
+                        dat = np.mean(dat, axis=0 if dat.shape[0] in (3, 4) else -1)
                     img_h, img_w = dat.shape
                     step = 2 if max(img_w, img_h) > 2500 else 1
                     
-                    # --- DER ANTI-C-CRASH FIX ---
-                    # 1. Zwinge die Daten in ein C-lesbares Float32 Array
                     d_sm = dat[::step, ::step].astype(np.float32)
                     d_sm = np.ascontiguousarray(d_sm)
                     d_sm = np.nan_to_num(d_sm)
@@ -646,17 +673,13 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                     
                     bkg = sep.Background(d_sm)
                     
-                    # 2. Die Notbremse: Das Rauschen MUSS mindestens 0.05% des Bildkontrasts betragen.
-                    # Wenn bkg.globalrms nahe 0 ist, würde SEP Millionen Objekte finden und das UI einfrieren!
                     min_allowed_rms = (img_max - img_min) * 0.0005
                     safe_rms = max(bkg.globalrms, min_allowed_rms)
                     
                     sub = d_sm - bkg
                     min_a = max(3, int(7 / (step*0.5))) 
                     
-                    # Wir nutzen safe_rms anstatt bkg.globalrms
                     objs = sep.extract(sub, 5.0, err=safe_rms, minarea=min_a)
-                    # ----------------------------
                     
                     num = len(objs); fw = ec = sn = vi = 0
                     dx = cum_dx; dy = cum_dy
@@ -748,10 +771,9 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                     msg = f"{i+1}: {flt}{sub_txt} {icons}| FWHM:{fw:.1f} | Ecc:{ec:.2f} | SNR:{sn:.1f} | Stars:{num} | Drift X:{dx:.0f} Y:{dy:.0f}"
                     log_buffer += msg + "\n"
                     
-                    # Alle 10 Bilder das GUI updaten (hält das Programm flüssig!)
                     if i % 10 == 0 or i == tot - 1:
                         def update_gui(b_txt, curr_i, filename):
-                            if not self.stop_req:
+                            if not self.stop_req and self.winfo_exists():
                                 self.log_box.insert("end", b_txt)
                                 self.log_box.see("end")
                                 self.prog.set((curr_i + 1) / tot)
@@ -761,16 +783,15 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                         log_buffer = ""
                     
                     del dat, d_sm, sub, bkg, objs
-                    import gc
                     if i % 20 == 0: gc.collect()
                     
             except Exception as e:
-                self.after(0, lambda err=e, fn=f: self.log_box.insert("end", f"Err {fn}: {err}\n"))
+                self.after(0, lambda err=e, fn=f: self.log_box.insert("end", f"Err {fn}: {err}\n") if self.winfo_exists() else None)
         
         if self.analysis_results:
             self.calculate_scores()
 
-        self.after(0, self.finish_scan)
+        self.after(0, lambda: self.finish_scan() if self.winfo_exists() else None)
 
     def calculate_scores(self):
         try:
@@ -807,7 +828,6 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 
                 base_score = (s_fw * W_FW + s_sn * W_SN + s_bk * W_BK + s_ec * W_EC + s_st * W_ST) * 100
                 
-                # Harte Strafen für Problembilder (zieht den Graph tief nach unten!)
                 if r.get('is_cloud'): base_score = min(base_score, 30.0)
                 if r.get('has_trail'): base_score = max(0.0, base_score - 20.0)
                 
@@ -850,7 +870,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
                 self.e_st.delete(0,'end'); self.e_st.insert(0, f"{np.median(pdata['stars'])*0.8:.0f}")
                 self.e_sn.delete(0,'end'); self.e_sn.insert(0, f"{np.median(pdata['snr'])*0.7:.1f}")
                 self.e_sc.delete(0,'end'); self.e_sc.insert(0, "40") 
-            except: pass
+            except Exception: pass
         
         self.current_pdata = pdata
         self.current_mode = mode
@@ -865,12 +885,10 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
             lw = 2 if is_score else 1
             ms = 4 if is_score else 3
             
-            # Basis-Daten zeichnen
             ax.plot(data['idx'], y, 'o-', color=c, ms=ms, lw=lw, picker=True)
             med = np.median(y); sig = np.std(y)
             ax.axhline(med, c='white', ls='--', label=f"Med: {med:.2f}")
             
-            # --- HIGHLIGHT: ROTER PUNKT ---
             if self.selected_frame_idx is not None and self.selected_frame_idx in data['idx']:
                 local_i = data['idx'].index(self.selected_frame_idx)
                 ax.plot(data['idx'][local_i], y[local_i], 'ro', markersize=7, markeredgecolor='white', zorder=10)
@@ -905,7 +923,6 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         
         if not self.filtered_results: return
         
-        # --- DRIFT / DITHER SCATTERPLOT ---
         dx_vals = [r['dx'] for r in self.filtered_results]
         dy_vals = [r['dy'] for r in self.filtered_results]
         
@@ -913,7 +930,6 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         self.ax_drift.plot(dx_vals[0], dy_vals[0], 'go', markersize=8, label="Start (1. Bild)")
         self.ax_drift.plot(dx_vals[-1], dy_vals[-1], 'ro', markersize=8, label="Ende (Letztes Bild)")
         
-        # --- HIGHLIGHT: ROTER PUNKT IM DRIFT ---
         if self.selected_frame_idx is not None:
             for r in self.filtered_results:
                 if r['idx'] == self.selected_frame_idx:
@@ -930,11 +946,10 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         self.ax_drift.legend(facecolor='#333', labelcolor='white')
         self.ax_drift.set_facecolor('#0a0a0a')
         
-        # --- 3x3 TILT INSPECTOR (HEATMAP) ---
         tilt_arrays = [r['tilt'] for r in self.filtered_results if not np.all(np.isnan(r['tilt']))]
         if tilt_arrays:
             avg_tilt = np.nanmedian(np.array(tilt_arrays), axis=0).reshape((3, 3))
-            cax = self.ax_tilt.imshow(avg_tilt, cmap='RdYlGn_r', interpolation='nearest', origin='upper')
+            self.ax_tilt.imshow(avg_tilt, cmap='RdYlGn_r', interpolation='nearest', origin='upper')
             self.ax_tilt.set_title("Optischer Tilt & Backfocus (Ø FWHM)", color='white', fontweight='bold')
             self.ax_tilt.set_xticks([])
             self.ax_tilt.set_yticks([])
@@ -954,12 +969,12 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         f = filedialog.asksaveasfilename(defaultextension=".csv")
         if f:
             try:
-                with open(f, 'w', newline='') as c:
+                with open(f, 'w', newline='', encoding='utf-8') as c:
                     w = csv.writer(c, delimiter=';')
                     w.writerow(["Dateiname", "Filter", "Objekt", "Exp", "Score", "FWHM", "Ecc", "Bkg", "Sterne", "SNR"])
                     for r in self.analysis_results: 
                         w.writerow([r['f'], r['fil'], r['obj'], r['exp'], r.get('score', 0), f"{r['fw']:.4f}", f"{r['ec']:.4f}", f"{r['bk']:.2f}", r['st'], f"{r['sn']:.2f}"])
-                self.log_box.insert("end", f"CSV gespeichert.\n")
+                self.log_box.insert("end", "CSV gespeichert.\n")
             except Exception as e: 
                 messagebox.showerror("Fehler", f"{e}")
 
@@ -981,7 +996,7 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
             devs = [r.get('dev', 'Unknown') for r in valid_res]
             from collections import Counter
             main_dev = Counter(devs).most_common(1)[0][0]
-        except: main_dev = "Unbekannt"
+        except Exception: main_dev = "Unbekannt"
 
         nb_keys = ["LP", "DUO", "DB", "NB", "OIII", "HA", "SII", "H-ALPHA", "UHC"]
         nb_count = sum(1 for r in self.analysis_results if any(k in r['fil'].upper() for k in nb_keys))
@@ -989,13 +1004,13 @@ class MetricAnalysisWindow(ctk.CTkToplevel):
         
         ana_dir = os.path.join(self.folder_path, "_Smart_Analysis")
         try: os.makedirs(ana_dir, exist_ok=True)
-        except: pass
+        except Exception: pass
         
         try:
             self.fig.savefig(os.path.join(ana_dir, "Smart_Metriken.png"))
             self.fig_pro.savefig(os.path.join(ana_dir, "Smart_Pro_Analyse.png"))
             save_success = True
-        except: save_success = False
+        except Exception: save_success = False
 
         prompt = f"""Ich habe {count} Astrofotos analysiert. 
 Genutztes Teleskop: {main_dev}
@@ -1027,10 +1042,10 @@ Dateiname;Score;FWHM;Ecc;SNR;Bkg;Stars
                 if os.name == 'nt': os.startfile(ana_dir)
                 elif sys.platform == 'darwin': subprocess.Popen(['open', ana_dir])
                 else: subprocess.Popen(['xdg-open', ana_dir])
-            except: pass
+            except Exception: pass
         
         msg = "KI Prompt kopiert!\n(Strg+V im Chat)."
-        if save_success: msg += f"\n\nOrdner geöffnet.\nBitte beide Grafiken in den Chat ziehen."
+        if save_success: msg += "\n\nOrdner geöffnet.\nBitte beide Grafiken in den Chat ziehen."
         messagebox.showinfo("Ready for AI", msg)
 
     def sort_files(self):
@@ -1041,14 +1056,14 @@ Dateiname;Score;FWHM;Ecc;SNR;Bkg;Stars
                 'sc': float(self.e_sc.get()) 
             }
             min_hits = int(self.cmb_min_hits.get())
-        except: 
+        except Exception: 
             messagebox.showerror("Err", "Zahlenformat!"); return
         
         tdir = os.path.join(self.folder_path, "_Aussortiert"); os.makedirs(tdir, exist_ok=True)
         cnt=0
         self.log_box.insert("end", f"\n--- Sortiere (Mind. {min_hits} Treffer nötig) ---\n")
         
-        with open(os.path.join(tdir, "_log.txt"), "a") as l:
+        with open(os.path.join(tdir, "_log.txt"), "a", encoding="utf-8") as l:
             for r in self.filtered_results:
                 bad = []
                 if self.chk_sc.get() and r.get('score', 100) < lims['sc']: bad.append(f"Score({r.get('score')})")
@@ -1058,7 +1073,6 @@ Dateiname;Score;FWHM;Ecc;SNR;Bkg;Stars
                 if self.chk_st.get() and r['st'] < lims['st']: bad.append("Stars")
                 if self.chk_sn.get() and r['sn'] < lims['sn']: bad.append("SNR") 
                 
-                # --- Prüfen, ob die Mindest-Trefferzahl erreicht wurde ---
                 if len(bad) >= min_hits:
                     try:
                         shutil.move(r['p'], os.path.join(tdir, r['f']))

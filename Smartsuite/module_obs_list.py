@@ -31,13 +31,21 @@ import astropy.units as u
 import ephem
 
 import smart_utils as utils
+import module_dwarf_control
 
-OBS_FILE = "smartsuite_obslist.json"
+def _app_path(filename):
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, filename)
+
+OBS_FILE = _app_path("smartsuite_obslist.json")
 
 def normalize_string(s):
     return s.lower().replace(" ", "").replace("_", "").replace("-", "")
 
-# --- NEU: Globale Kompass-Umrechnung ---
+# --- Globale Kompass-Umrechnung ---
 def az_to_compass(az):
     dirs = ["N", "NNO", "NO", "ONO", "O", "OSO", "SO", "SSO", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
     idx = int((az + 11.25) / 22.5) % 16
@@ -66,7 +74,6 @@ def add_event(iso_date, display_date, time_str, title, desc, icon):
     save_list(data)
     return True
 
-# --- FIX: Kugelsicheres Löschen (Ignoriert alte KeyErrors!) ---
 def remove_event(event_id, fallback_title=None, fallback_date=None):
     data = load_list()
     new_data = []
@@ -79,9 +86,7 @@ def remove_event(event_id, fallback_title=None, fallback_date=None):
                 continue
         new_data.append(x)
     save_list(new_data)
-# --------------------------------------------------------------
 
-# --- NEU: Veraltete AstroTracker-Ziele (Kometen/Asteroiden) automatisch entfernen ---
 def _cleanup_expired_tracker_targets():
     notes_path, cache_path, _ = get_list_paths()
     if not os.path.exists(notes_path): return
@@ -98,18 +103,16 @@ def _cleanup_expired_tracker_targets():
             if not data.get("todo"): continue
             
             note_text = data.get("note", "")
-            # NEU: Suche nach dem String: (Berechnet für 14.06. 22:00 Lokalzeit)
             match = re.search(r'\(Berechnet für (\d{2}\.\d{2}\. \d{2}:\d{2}) Lokalzeit\)', note_text)
             if match:
                 time_str = match.group(1)
                 current_year = current_time_utc.year
                 try:
-                    # Datum einlesen
                     target_time_naive = datetime.strptime(f"{time_str}.{current_year}", "%d.%m. %H:%M.%Y")
-                    # Dem System sagen: Das war ein deutsches Datum! Und dann in UTC umrechnen zum Vergleichen.
                     target_time_utc = local_tz.localize(target_time_naive).astimezone(pytz.utc)
+                    if target_time_utc.month == 1 and current_time_utc.month == 12:
+                        target_time_utc = target_time_utc.replace(year=current_year + 1)
                     
-                    # Wenn der berechnete Zeitpunkt 2 Stunden in der Vergangenheit liegt
                     if current_time_utc > target_time_utc + timedelta(hours=2):
                         data["todo"] = False
                         changed = True
@@ -119,25 +122,22 @@ def _cleanup_expired_tracker_targets():
             with open(notes_path, "w", encoding="utf-8") as f: 
                 json.dump(notes, f, indent=4, ensure_ascii=False)
     except: pass
-# -------------------------------------------------------------------------
 
-# --- NEU: ZENTRALE PFAD-VERWALTUNG ---
 def get_list_paths():
     cfg = utils.load_config()
     target_dir = cfg.get("custom_tools_path", "")
     
-    notes_path = os.path.join(target_dir, "user_notes.json") if target_dir else "user_notes.json"
-    cache_path = os.path.join(target_dir, "coordinate_cache.json") if target_dir else "coordinate_cache.json"
-    cat_path = os.path.join(target_dir, "catalogs.json") if target_dir else "catalogs.json"
+    notes_path = os.path.join(target_dir, "user_notes.json") if target_dir else _app_path("user_notes.json")
+    cache_path = os.path.join(target_dir, "coordinate_cache.json") if target_dir else _app_path("coordinate_cache.json")
+    cat_path = os.path.join(target_dir, "catalogs.json") if target_dir else _app_path("catalogs.json")
     
     return notes_path, cache_path, cat_path
 
 def load_aae_targets_rich():
-    _cleanup_expired_tracker_targets() # NEU: Bevor wir laden, fegen wir durch!
+    _cleanup_expired_tracker_targets()
     
     notes_path, cache_path, cat_path = get_list_paths()
     
-    # NEU: Wenn die Datei gar nicht existiert, brechen wir ab und geben None zurück!
     if not os.path.exists(notes_path):
         return None
         
@@ -251,7 +251,6 @@ def load_aae_targets_rich():
     lat = float(cfg.get("default_lat", 51.16))
     lon = float(cfg.get("default_lon", 10.45))
     
-    # Sicheres Parsen der Höhe
     try:
         ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
         elevation = float(ele_raw) if ele_raw else 0.0
@@ -294,12 +293,78 @@ def load_aae_targets_rich():
                 moon_score = 50 - ((tgt["moon_phase"] / 100) * dist_factor * 50)
                 tgt["score"] = int(round(alt_score + moon_score))
             
-    except Exception as e:
+    except Exception:
         pass
 
     final_list = list(unique_targets.values())
     final_list.sort(key=lambda x: x.get("score", -1), reverse=True) 
     return final_list
+
+
+# ==============================================================================
+# WETTER-HILFSFUNKTIONEN (DWD ICON + MET NORWAY)
+# ==============================================================================
+def _calc_eff_cloud(low, mid, high, total, fog=0.0):
+    if low is not None and mid is not None and high is not None:
+        l_f = max(0.0, min(1.0, float(low) / 100.0))
+        m_f = max(0.0, min(1.0, (float(mid) / 100.0) * 0.75))
+        h_f = max(0.0, min(1.0, (float(high) / 100.0) * 0.30))
+        eff = (1.0 - (1.0 - l_f) * (1.0 - m_f) * (1.0 - h_f)) * 100.0
+    elif total is not None:
+        eff = float(total)
+    else:
+        return None
+    if fog and float(fog) > 0:
+        eff = max(eff, min(100.0, float(fog) * 1.2))
+    return round(min(100.0, max(0.0, eff)), 1)
+
+def _calc_night_window(target_date, lat, lon, elevation, local_tz, now_local, is_today):
+    obs = ephem.Observer()
+    obs.lat = str(lat)
+    obs.lon = str(lon)
+    obs.elevation = elevation
+    sun = ephem.Sun()
+
+    noon_local = local_tz.localize(datetime(target_date.year, target_date.month, target_date.day, 12, 0))
+    noon_utc = noon_local.astimezone(pytz.utc)
+
+    dusk_local = None
+    dawn_local = None
+
+    for horizon_deg in ('-12', '-6'):
+        try:
+            obs.horizon = horizon_deg
+            obs.date = noon_utc
+            dusk_utc = obs.next_setting(sun, use_center=True).datetime().replace(tzinfo=pytz.utc)
+            obs.date = dusk_utc
+            dawn_utc = obs.next_rising(sun, use_center=True).datetime().replace(tzinfo=pytz.utc)
+            dusk_local = dusk_utc.astimezone(local_tz)
+            dawn_local = dawn_utc.astimezone(local_tz)
+            break
+        except (ephem.AlwaysUpError, ephem.NeverUpError):
+            continue
+
+    if dusk_local is None or dawn_local is None:
+        dusk_local = local_tz.localize(datetime(target_date.year, target_date.month, target_date.day, 22, 0))
+        next_day = target_date + timedelta(days=1)
+        dawn_local = local_tz.localize(datetime(next_day.year, next_day.month, next_day.day, 4, 0))
+
+    start_h = dusk_local.replace(minute=0, second=0, microsecond=0)
+    if dusk_local.minute >= 30:
+        start_h += timedelta(hours=1)
+    end_h = dawn_local.replace(minute=0, second=0, microsecond=0)
+
+    if is_today:
+        cur_h = now_local.replace(minute=0, second=0, microsecond=0)
+        if cur_h > start_h and cur_h <= end_h:
+            start_h = cur_h
+
+    hours = []
+    curr = start_h
+    while curr <= end_h:
+        hours.append(curr)
+        curr += timedelta(hours=1)
+    return hours, dusk_local, dawn_local
 
 
 class ObsListFrame(ctk.CTkFrame):
@@ -331,8 +396,8 @@ class ObsListFrame(ctk.CTkFrame):
         self.weather_container = ctk.CTkFrame(self, fg_color="#141414", border_width=1, border_color="#34495e", corner_radius=8, cursor="hand2")
         self.weather_container.pack(fill="x", padx=20, pady=(0, 5))
         self.weather_content = ctk.CTkFrame(self.weather_container, fg_color="transparent", cursor="hand2")
-        self.weather_content.pack(pady=10)
-        self.weather_lbl = ctk.CTkLabel(self.weather_content, text="Lade Astro-Wetter (Open-Meteo)...", font=("Arial", 12), text_color="gray", cursor="hand2")
+        self.weather_content.pack(fill="x", padx=10, pady=8)
+        self.weather_lbl = ctk.CTkLabel(self.weather_content, text="Lade Astro-Wetter (DWD ICON + MET Norway)...", font=("Arial", 12), text_color="gray", cursor="hand2")
         self.weather_lbl.pack()
         self.weather_lat = 51.16
         self.weather_lon = 10.45
@@ -455,7 +520,7 @@ class ObsListFrame(ctk.CTkFrame):
                         self.after(0, lambda: messagebox.showinfo("Stellarium", "Es ist gerade kein Objekt in Stellarium markiert!"))
                 else:
                     self.after(0, lambda: messagebox.showwarning("Stellarium", "Konnte keine Daten von Stellarium abrufen."))
-            except Exception as e:
+            except Exception:
                 self.after(0, lambda: messagebox.showwarning("Stellarium", "Keine Verbindung zu Stellarium.\n\nIst Stellarium geöffnet und das 'Remote Control' Plugin (Port 8090) aktiv?"))
             finally:
                 self.after(0, lambda: self.btn_stellarium_get.configure(state="normal", text="🌌 Aus Stellarium übernehmen"))
@@ -517,7 +582,7 @@ class ObsListFrame(ctk.CTkFrame):
                     payload = {"j2000": f"[{x},{y},{z}]"}
                     requests.post(url_view, params=payload, timeout=2)
                     
-            except Exception as e:
+            except Exception:
                 self.after(0, lambda: messagebox.showwarning("Stellarium", "Keine Verbindung zu Stellarium auf Port 8090."))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -641,77 +706,265 @@ class ObsListFrame(ctk.CTkFrame):
         url = f"https://www.windy.com/?clouds,{self.weather_lat},{self.weather_lon},6"
         webbrowser.open(url)
 
+    # ==========================================================================
+    # NEUE WETTER-ENGINE: DWD ICON + MET NORWAY + SCHICHTWOLKEN + NACHTFENSTER
+    # ==========================================================================
     def load_weather(self):
         self._weather_forecasts = None
         self._weather_error = False
-        
+
         def fetch():
             try:
                 cfg = utils.load_config()
                 lat = float(cfg.get("default_lat", 51.16))
                 lon = float(cfg.get("default_lon", 10.45))
-                self.weather_lat = lat; self.weather_lon = lon
-                
-                url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=cloudcover,temperature_2m,dewpoint_2m,windspeed_10m&timezone=Europe%2FBerlin"
-                r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-                if r.status_code != 200: raise Exception(f"API Error {r.status_code}: {r.text}")
-                    
-                data = r.json()
-                times = data['hourly']['time']
-                clouds = data['hourly']['cloudcover']
-                temps = data['hourly']['temperature_2m']
-                dews = data['hourly']['dewpoint_2m']
-                winds = data['hourly']['windspeed_10m']
-                
-                today = datetime.now().date()
+                try:
+                    ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
+                    elevation = float(ele_raw) if ele_raw else 0.0
+                except Exception:
+                    elevation = 0.0
+
+                self.weather_lat = lat
+                self.weather_lon = lon
+
+                # 1. DWD ICON via Open-Meteo laden (Fallback auf Standard-Forecast)
+                om_map = {}
+                om_urls = [
+                    (
+                        f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+                        f"&hourly=cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,"
+                        f"temperature_2m,dew_point_2m,wind_speed_10m&models=icon_seamless&timezone=UTC"
+                    ),
+                    (
+                        f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+                        f"&hourly=cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,"
+                        f"temperature_2m,dew_point_2m,wind_speed_10m&timezone=UTC"
+                    )
+                ]
+                for url in om_urls:
+                    try:
+                        r = requests.get(url, headers={'User-Agent': 'SmartSuite/1.2.3'}, timeout=6)
+                        if r.status_code == 200:
+                            h = r.json().get("hourly", {})
+                            times_om = h.get("time", [])
+                            cc_tot = h.get("cloud_cover", [])
+                            cc_low = h.get("cloud_cover_low", [])
+                            cc_mid = h.get("cloud_cover_mid", [])
+                            cc_high = h.get("cloud_cover_high", [])
+                            temps_om = h.get("temperature_2m", [])
+                            dews_om = h.get("dew_point_2m", [])
+                            winds_om = h.get("wind_speed_10m", [])
+                            for idx, t_str in enumerate(times_om):
+                                dt_u = datetime.fromisoformat(t_str).replace(tzinfo=pytz.utc, minute=0, second=0, microsecond=0)
+                                om_map[dt_u] = {
+                                    "tot": cc_tot[idx] if idx < len(cc_tot) else None,
+                                    "low": cc_low[idx] if idx < len(cc_low) else None,
+                                    "mid": cc_mid[idx] if idx < len(cc_mid) else None,
+                                    "high": cc_high[idx] if idx < len(cc_high) else None,
+                                    "temp": temps_om[idx] if idx < len(temps_om) else None,
+                                    "dew": dews_om[idx] if idx < len(dews_om) else None,
+                                    "wind": winds_om[idx] if idx < len(winds_om) else None,
+                                }
+                            if om_map:
+                                break
+                    except Exception:
+                        pass
+
+                # 2. MET Norway (ECMWF + Nebel) laden
+                met_entries = []
+                try:
+                    met_url = f"https://api.met.no/weatherapi/locationforecast/2.0/complete?lat={round(lat, 4)}&lon={round(lon, 4)}"
+                    met_headers = {'User-Agent': 'SmartSuite/1.2.3 github.com/SteffSarek/SmartSuite'}
+                    r_met = requests.get(met_url, headers=met_headers, timeout=6)
+                    if r_met.status_code == 200:
+                        ts_list = r_met.json().get("properties", {}).get("timeseries", [])
+                        for item in ts_list:
+                            t_iso = item.get("time", "").replace("Z", "+00:00")
+                            dt_u = datetime.fromisoformat(t_iso).astimezone(pytz.utc)
+                            det = item.get("data", {}).get("instant", {}).get("details", {})
+                            ws = det.get("wind_speed")
+                            met_entries.append((dt_u, {
+                                "tot": det.get("cloud_area_fraction"),
+                                "low": det.get("cloud_area_fraction_low"),
+                                "mid": det.get("cloud_area_fraction_medium"),
+                                "high": det.get("cloud_area_fraction_high"),
+                                "fog": det.get("fog_area_fraction", 0.0),
+                                "temp": det.get("air_temperature"),
+                                "dew": det.get("dew_point_temperature"),
+                                "wind": (ws * 3.6) if ws is not None else None,
+                            }))
+                except Exception:
+                    pass
+
+                if not om_map and not met_entries:
+                    raise Exception("Weder DWD ICON noch MET Norway erreichbar.")
+
+                def find_met_entry(dt_target_utc):
+                    if not met_entries:
+                        return None
+                    best_diff = 999999
+                    best_val = None
+                    for e_dt, e_val in met_entries:
+                        diff = abs((e_dt - dt_target_utc).total_seconds())
+                        if diff < best_diff:
+                            best_diff = diff
+                            best_val = e_val
+                    return best_val if best_diff <= 10800 else None
+
+                local_tz = pytz.timezone('Europe/Berlin')
+                now_local = datetime.now(local_tz)
+                today = now_local.date()
+
                 forecasts = []
-                
                 for day_offset in range(3):
                     target_date = today + timedelta(days=day_offset)
-                    night_clouds = []; night_winds = []; dew_spreads = [] 
-                    for t_str, c, temp, dew, w in zip(times, clouds, temps, dews, winds):
-                        dt = datetime.fromisoformat(t_str)
-                        if (dt.date() == target_date and dt.hour >= 22) or (dt.date() == target_date + timedelta(days=1) and dt.hour <= 4):
-                            night_clouds.append(c); night_winds.append(w)
-                            if temp is not None and dew is not None: dew_spreads.append(temp - dew)
-                            
-                    if night_clouds:
-                        avg_c = sum(night_clouds) / len(night_clouds)
-                        avg_w = sum(night_winds) / len(night_winds)
-                        min_spread = min(dew_spreads) if dew_spreads else 5.0
-                        
-                        observer = ephem.Observer()
-                        observer.date = ephem.Date(datetime(target_date.year, target_date.month, target_date.day, 21, 0)) 
-                        moon = ephem.Moon()
-                        moon.compute(observer)
-                        moon_phase = moon.phase
-                        
-                        score = 100.0
-                        score -= avg_c
-                        if avg_w > 15: score -= 10
-                        if avg_w > 25: score -= 20
-                        
-                        dew_risk = "OK"
-                        if min_spread <= 1.0: score -= 10; dew_risk = "Hoch!"
-                        elif min_spread <= 2.5: score -= 5; dew_risk = "Mittel"
-                            
-                        score -= (moon_phase * 0.25)
-                        score = max(0, min(100, int(score)))
-                        
-                        if score >= 75: color = "#2ecc71"; icon = "✨"
-                        elif score >= 40: color = "#f39c12"; icon = "⛅"
-                        else: color = "#e74c3c"; icon = "☁️"
-                            
-                        if moon_phase > 90: moon_icon = "🌕"
-                        elif moon_phase > 60: moon_icon = "🌖"
-                        elif moon_phase > 40: moon_icon = "🌗"
-                        elif moon_phase > 15: moon_icon = "🌘"
-                        else: moon_icon = "🌑"
-                            
-                        day_name = "Heute" if day_offset == 0 else "Morgen" if day_offset == 1 else "Übermorgen"
-                        info_str = f"Score: {score} | ☁️{int(avg_c)}% | 💨{int(avg_w)}kmh | 💧{dew_risk} | {moon_icon}{int(moon_phase)}%"
-                        forecasts.append({"name": f"{day_name}:", "text": f"{icon} {info_str}", "color": color})
-                
+                    night_hours, dusk_loc, dawn_loc = _calc_night_window(
+                        target_date, lat, lon, elevation, local_tz, now_local, is_today=(day_offset == 0)
+                    )
+
+                    # Mondphase für 22 Uhr lokal
+                    obs_moon = ephem.Observer()
+                    obs_moon.date = ephem.Date(local_tz.localize(datetime(target_date.year, target_date.month, target_date.day, 22, 0)).astimezone(pytz.utc))
+                    moon = ephem.Moon()
+                    moon.compute(obs_moon)
+                    moon_phase = moon.phase
+
+                    if moon_phase > 90: moon_icon = "🌕"
+                    elif moon_phase > 60: moon_icon = "🌖"
+                    elif moon_phase > 40: moon_icon = "🌗"
+                    elif moon_phase > 15: moon_icon = "🌘"
+                    else: moon_icon = "🌑"
+
+                    hourly_details = []
+                    for h_loc in night_hours:
+                        h_utc = h_loc.astimezone(pytz.utc).replace(minute=0, second=0, microsecond=0)
+                        om = om_map.get(h_utc)
+                        met = find_met_entry(h_utc)
+
+                        c_om = _calc_eff_cloud(om["low"], om["mid"], om["high"], om["tot"]) if om else None
+                        c_met = _calc_eff_cloud(met["low"], met["mid"], met["high"], met["tot"], met.get("fog", 0.0)) if met else None
+
+                        if c_om is not None and c_met is not None:
+                            eff_c = (c_om + c_met) / 2.0
+                            model_diff = abs(c_om - c_met)
+                        elif c_om is not None:
+                            eff_c = c_om
+                            model_diff = None
+                        elif c_met is not None:
+                            eff_c = c_met
+                            model_diff = None
+                        else:
+                            continue
+
+                        winds = [x["wind"] for x in (om, met) if x and x.get("wind") is not None]
+                        avg_wind = sum(winds) / len(winds) if winds else 0.0
+
+                        spreads = [x["temp"] - x["dew"] for x in (om, met) if x and x.get("temp") is not None and x.get("dew") is not None]
+                        spread = min(spreads) if spreads else 5.0
+
+                        h_score = 100.0 - eff_c
+                        if avg_wind > 25: h_score -= 20
+                        elif avg_wind > 15: h_score -= 10
+                        if spread <= 1.0: h_score -= 10
+                        elif spread <= 2.5: h_score -= 5
+                        h_score -= (moon_phase * 0.25)
+                        h_score = max(0, min(100, int(round(h_score))))
+
+                        hourly_details.append({
+                            "dt_local": h_loc,
+                            "hour_str": h_loc.strftime("%H:%M"),
+                            "eff_cloud": round(eff_c, 0),
+                            "c_dwd": round(c_om, 0) if c_om is not None else None,
+                            "c_ecmwf": round(c_met, 0) if c_met is not None else None,
+                            "model_diff": round(model_diff, 0) if model_diff is not None else None,
+                            "wind": avg_wind,
+                            "spread": spread,
+                            "score": h_score,
+                        })
+
+                    if not hourly_details:
+                        continue
+
+                    # Längstes klares Zeitfenster (eff_cloud <= 35%) suchen
+                    best_run = []
+                    cur_run = []
+                    for hd in hourly_details:
+                        if hd["eff_cloud"] <= 35:
+                            cur_run.append(hd)
+                        else:
+                            if len(cur_run) > len(best_run):
+                                best_run = cur_run
+                            cur_run = []
+                    if len(cur_run) > len(best_run):
+                        best_run = cur_run
+
+                    avg_c = sum(x["eff_cloud"] for x in hourly_details) / len(hourly_details)
+                    avg_w = sum(x["wind"] for x in hourly_details) / len(hourly_details)
+                    min_spread = min(x["spread"] for x in hourly_details)
+                    diffs = [x["model_diff"] for x in hourly_details if x["model_diff"] is not None]
+                    avg_diff = (sum(diffs) / len(diffs)) if diffs else None
+
+                    dew_risk = "OK"
+                    if min_spread <= 1.0: dew_risk = "Hoch!"
+                    elif min_spread <= 2.5: dew_risk = "Mittel"
+
+                    clear_cnt = len(best_run)
+                    total_cnt = len(hourly_details)
+
+                    if clear_cnt >= 2:
+                        w_start = best_run[0]["dt_local"].strftime("%H")
+                        w_end = (best_run[-1]["dt_local"] + timedelta(hours=1)).strftime("%H")
+                        win_score = int(sum(x["score"] for x in best_run) / clear_cnt)
+                        win_str = f"{w_start}–{w_end}h ({clear_cnt}h)"
+                    else:
+                        best_single = max(hourly_details, key=lambda x: x["score"])
+                        win_score = best_single["score"]
+                        win_str = f"Dicht (Ø {int(avg_c)}%)"
+
+                    if clear_cnt >= max(3, int(total_cnt * 0.5)) and win_score >= 65:
+                        color = "#2ecc71"
+                        icon = "✨"
+                    elif clear_cnt >= 2:
+                        color = "#f39c12"
+                        icon = "⛅"
+                    else:
+                        color = "#e74c3c"
+                        icon = "☁️"
+
+                    if avg_diff is None:
+                        conf_str = "Nur 1 Modell verfügbar"
+                    elif avg_diff <= 20:
+                        conf_str = "Hohe Sicherheit (DWD & ECMWF einig)"
+                    elif avg_diff <= 40:
+                        conf_str = "Mittlere Sicherheit (leichte Abweichung)"
+                    else:
+                        conf_str = "Unsicher! (DWD & ECMWF weichen stark ab)"
+
+                    day_name = "Heute" if day_offset == 0 else "Morgen" if day_offset == 1 else "Übermorgen"
+
+                    if clear_cnt >= 2:
+                        summary_short = f"{icon} {win_str} | Score {win_score} | 💨{int(avg_w)} | 💧{dew_risk} | {moon_icon}{int(moon_phase)}%"
+                    else:
+                        summary_short = f"{icon} {win_str} | 💨{int(avg_w)}kmh | 💧{dew_risk} | {moon_icon}{int(moon_phase)}%"
+
+                    forecasts.append({
+                        "name": day_name,
+                        "text": summary_short,
+                        "color": color,
+                        "win_str": win_str,
+                        "win_score": win_score,
+                        "clear_cnt": clear_cnt,
+                        "avg_cloud": int(avg_c),
+                        "avg_wind": int(avg_w),
+                        "dew_risk": dew_risk,
+                        "moon_icon": moon_icon,
+                        "moon_phase": int(moon_phase),
+                        "conf_str": conf_str,
+                        "dusk": dusk_loc.strftime("%H:%M"),
+                        "dawn": dawn_loc.strftime("%H:%M"),
+                        "hours": hourly_details
+                    })
+
                 self._weather_forecasts = forecasts
             except Exception as e:
                 print(f"Weather fetch error: {e}")
@@ -732,27 +985,32 @@ class ObsListFrame(ctk.CTkFrame):
 
     def render_weather(self, forecasts):
         for w in self.weather_content.winfo_children(): w.destroy()
+
+        grid_box = ctk.CTkFrame(self.weather_content, fg_color="transparent")
+        grid_box.pack(fill="x", expand=True)
+
         for idx, fc in enumerate(forecasts):
-            f_frame = ctk.CTkFrame(self.weather_content, fg_color="transparent", cursor="hand2")
-            f_frame.pack(side="left", expand=True)
-            f_frame.bind("<Button-1>", self.open_weather_website)
-            l1 = ctk.CTkLabel(f_frame, text=fc["name"], font=("Arial", 12, "bold"), text_color="#ecf0f1", cursor="hand2")
-            l1.pack(side="left", padx=(0, 5))
+            grid_box.grid_columnconfigure(idx, weight=1)
+            card = ctk.CTkFrame(grid_box, fg_color="#1d1d1d", corner_radius=6, cursor="hand2")
+            card.grid(row=0, column=idx, padx=4, sticky="ew")
+            card.bind("<Button-1>", self.open_weather_website)
+
+            l1 = ctk.CTkLabel(card, text=f"{fc['name']}:", font=("Arial", 12, "bold"), text_color="#ecf0f1", cursor="hand2")
+            l1.pack(side="left", padx=(8, 4), pady=4)
             l1.bind("<Button-1>", self.open_weather_website)
-            l2 = ctk.CTkLabel(f_frame, text=fc["text"], font=("Arial", 12, "bold"), text_color=fc["color"], cursor="hand2")
-            l2.pack(side="left")
+
+            l2 = ctk.CTkLabel(card, text=fc["text"], font=("Arial", 12, "bold"), text_color=fc["color"], cursor="hand2")
+            l2.pack(side="left", padx=(0, 8), pady=4)
             l2.bind("<Button-1>", self.open_weather_website)
-            if idx < len(forecasts) - 1:
-                sep = ctk.CTkLabel(self.weather_content, text="  |  ", text_color="#7f8c8d", cursor="hand2")
-                sep.pack(side="left", padx=5)
-                sep.bind("<Button-1>", self.open_weather_website)
-                
-        links_frame = ctk.CTkFrame(self.weather_content, fg_color="transparent")
-        links_frame.pack(side="left", padx=(15, 0))
-        hint_mb = ctk.CTkLabel(links_frame, text="🌐 Meteoblue Seeing", font=("Arial", 11, "underline"), text_color="#3498db", cursor="hand2")
-        hint_mb.pack(side="left", padx=(0, 10))
+
+        links_frame = ctk.CTkFrame(grid_box, fg_color="transparent")
+        links_frame.grid(row=0, column=len(forecasts), padx=(8, 0), sticky="e")
+
+        hint_mb = ctk.CTkLabel(links_frame, text="🌐 Seeing", font=("Arial", 11, "underline"), text_color="#3498db", cursor="hand2")
+        hint_mb.pack(side="left", padx=(0, 8))
         hint_mb.bind("<Button-1>", self.open_weather_website)
-        hint_radar = ctk.CTkLabel(links_frame, text="📡 Wolkenradar (Windy)", font=("Arial", 11, "underline"), text_color="#3498db", cursor="hand2")
+
+        hint_radar = ctk.CTkLabel(links_frame, text="📡 Radar", font=("Arial", 11, "underline"), text_color="#3498db", cursor="hand2")
         hint_radar.pack(side="left")
         hint_radar.bind("<Button-1>", self.open_cloud_radar)
 
@@ -761,7 +1019,6 @@ class ObsListFrame(ctk.CTkFrame):
         lat = float(cfg.get("default_lat", 51.16))
         lon = float(cfg.get("default_lon", 10.45))
         
-        # Sicheres Parsen der Höhe
         try:
             ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
             elevation = float(ele_raw) if ele_raw else 0.0
@@ -826,17 +1083,12 @@ class ObsListFrame(ctk.CTkFrame):
                         if alt >= 20: current_score += (alt * 2) 
                         else: current_score -= ((20 - alt) * 5) 
                         
-                        # Ist es ein zeitkritisches Ziel vom AstroTracker?
                         is_tracker_target = "(Berechnet für" in t.get("note", "")
                         
                         if is_tracker_target:
-                            # 1000 Punkte Bonus für den ersten Durchlauf
                             current_score += 1000
-                            # Aber MASSIVE Strafe (-2000), sobald es seinen Slot hatte!
-                            # So geben wir dem Rest der Beobachtungsliste auch eine Chance.
                             current_score -= (scheduled_counts[t['name']] * 2000)
                         else:
-                            # Normale Strafe für Deep-Sky-Objekte
                             current_score -= (scheduled_counts[t['name']] * 150)
 
                         if current_score > best_score:
@@ -872,9 +1124,46 @@ class ObsListFrame(ctk.CTkFrame):
         w_frame = ctk.CTkFrame(self.scroll_tonight, fg_color="#1a1a1a", border_width=1, border_color="#34495e", corner_radius=8)
         w_frame.pack(fill="x", padx=10, pady=5)
         w_str = "Wetter wird geladen..."
-        if self._weather_forecasts: w_str = self._weather_forecasts[0]['text']
-        ctk.CTkLabel(w_frame, text="Bedingungen Heute", font=("Arial", 14, "bold"), text_color="#3498db").pack(anchor="w", padx=10, pady=(10,0))
-        ctk.CTkLabel(w_frame, text=w_str, font=("Arial", 14)).pack(anchor="w", padx=10, pady=(5,10))
+
+        if self._weather_forecasts:
+            fc0 = self._weather_forecasts[0]
+            w_str = fc0['text']
+            head_w = ctk.CTkFrame(w_frame, fg_color="transparent")
+            head_w.pack(fill="x", padx=10, pady=(10, 4))
+            ctk.CTkLabel(head_w, text="Bedingungen Heute Nacht", font=("Arial", 14, "bold"), text_color="#3498db").pack(side="left")
+            ctk.CTkLabel(head_w, text=f"Dämmerung: {fc0['dusk']} – {fc0['dawn']} Uhr  |  {fc0['conf_str']}", font=("Arial", 11), text_color="gray").pack(side="right")
+
+            ctk.CTkLabel(w_frame, text=w_str, font=("Arial", 14, "bold"), text_color=fc0['color']).pack(anchor="w", padx=10, pady=(2, 8))
+
+            # Stunden-Timeline für heute Nacht
+            if fc0.get("hours"):
+                tl_frame = ctk.CTkFrame(w_frame, fg_color="#121212", corner_radius=6)
+                tl_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+                for col_i, hd in enumerate(fc0["hours"]):
+                    tl_frame.grid_columnconfigure(col_i, weight=1)
+                    ec = int(hd["eff_cloud"])
+                    if ec <= 25:
+                        h_col, h_ico, bg_c = "#2ecc71", "✨", "#12291c"
+                    elif ec <= 50:
+                        h_col, h_ico, bg_c = "#f39c12", "⛅", "#292012"
+                    else:
+                        h_col, h_ico, bg_c = "#e74c3c", "☁️", "#261414"
+
+                    cell = ctk.CTkFrame(tl_frame, fg_color=bg_c, corner_radius=4, border_width=1, border_color="#2a2a2a")
+                    cell.grid(row=0, column=col_i, padx=2, pady=5, sticky="ew")
+
+                    ctk.CTkLabel(cell, text=hd["hour_str"], font=("Consolas", 11, "bold"), text_color="#ecf0f1").pack(pady=(4, 0))
+                    ctk.CTkLabel(cell, text=f"{h_ico} {ec}%", font=("Arial", 12, "bold"), text_color=h_col).pack(pady=1)
+
+                    if hd["c_dwd"] is not None and hd["c_ecmwf"] is not None:
+                        mod_txt = f"D:{int(hd['c_dwd'])} E:{int(hd['c_ecmwf'])}"
+                    else:
+                        mod_txt = f"💨{int(hd['wind'])}kmh"
+                    ctk.CTkLabel(cell, text=mod_txt, font=("Arial", 9), text_color="gray").pack(pady=(0, 4))
+        else:
+            ctk.CTkLabel(w_frame, text="Bedingungen Heute", font=("Arial", 14, "bold"), text_color="#3498db").pack(anchor="w", padx=10, pady=(10,0))
+            ctk.CTkLabel(w_frame, text=w_str, font=("Arial", 14)).pack(anchor="w", padx=10, pady=(5,10))
         
         today_str = datetime.now().strftime("%Y-%m-%d")
         events_today = [e for e in self.last_events if e['iso_date'] == today_str]
@@ -953,7 +1242,6 @@ class ObsListFrame(ctk.CTkFrame):
             
         prompt += "Da ich meinen Standort wählen kann (oder zwei Teleskope gleichzeitig nutze), habe ich hier ZWEI getrennte Pläne berechnet:\n\n"
         
-        # Liste für die bereits verplanten Ziele
         planned_target_names = []
         
         if not night_plans.get("Süd") and not night_plans.get("Nord"): 
@@ -968,7 +1256,6 @@ class ObsListFrame(ctk.CTkFrame):
                         planned_target_names.append(block['target']['name'])
                     prompt += "\n"
                     
-        # --- NEU: Komplette restliche Beobachtungsliste mitgeben ---
         if hasattr(self, "last_targets") and self.last_targets:
             unplanned_targets = [t for t in self.last_targets if t["name"] not in planned_target_names]
             
@@ -977,11 +1264,9 @@ class ObsListFrame(ctk.CTkFrame):
                 prompt += "Hier sind alle anderen Objekte, die ich mir gemerkt habe, die aber heute nicht im obigen Plan gelandet sind (z.B. weil sie zu tief stehen oder der Mond zu nah ist):\n"
                 for t in unplanned_targets:
                     note = f" (Notiz: {t['note']})" if t.get('note') else ""
-                    # Wir geben der KI auch den Score mit, damit sie sieht, wie "gut" die App das Ziel bewertet hat
                     score_str = f" [Auto-Score heute: {t.get('score', 0)}/100]" if t.get('score', -1) >= 0 else ""
                     prompt += f"- {t['name']}{note}{score_str}\n"
                 prompt += "\n"
-        # -----------------------------------------------------------
                 
         prompt += "Bitte beantworte mir folgende Punkte exakt in dieser Reihenfolge:\n"
         prompt += "1. Lohnt sich Astrofotografie heute bei diesem Wetter und der Mondphase?\n"
@@ -994,7 +1279,6 @@ class ObsListFrame(ctk.CTkFrame):
         
         msg = "Der Prompt mit beiden Teleskop-Plänen und der restlichen Beobachtungsliste wurde kopiert!\n\nMöchtest du ChatGPT jetzt im Browser öffnen?"
         if messagebox.askyesno("KI-Prompt kopiert!", msg):
-            import webbrowser
             webbrowser.open("https://chatgpt.com/")
 
     def delete_event(self, event_id, fallback_title=None, fallback_date=None):
@@ -1122,17 +1406,209 @@ class ObsListFrame(ctk.CTkFrame):
                             try:
                                 url = f"http://localhost:1888/v2/api/framing/set-coordinates?RAangle={r}&DecAngle={d}"
                                 res = requests.get(url, timeout=2)
-                                if res.status_code == 200:
-                                    pass
-                                else:
+                                if res.status_code != 200:
                                     self.after(0, lambda: messagebox.showwarning("N.I.N.A.", f"N.I.N.A. meldet Fehler: {res.status_code}"))
-                            except Exception as e:
+                            except Exception:
                                 self.after(0, lambda: messagebox.showwarning("N.I.N.A.", "Keine Verbindung zu N.I.N.A.\n\nIst N.I.N.A. geöffnet?"))
                                 
                         threading.Thread(target=worker, daemon=True).start()
                         
                     btn_nina_push.configure(command=push_to_nina)
                     btn_nina_push.pack(side="left", padx=5)
+                    
+                    # ==========================================
+                    # DWARF CONTROL PANEL AUFRUF
+                    # ==========================================
+                    btn_dwarf = ctk.CTkButton(coord_frame, text="🔭 Dwarf Steuerung", height=24, fg_color="transparent", text_color="#f39c12", border_color="#f39c12", border_width=1, hover_color="#4a3104")
+                    
+                    def open_dwarf_panel(n=item["name"], r=item.get("ra"), d=item.get("dec")):
+                        if not module_dwarf_control.DWARF_API_AVAILABLE:
+                            messagebox.showerror("Fehler", "Dwarf API nicht gefunden!")
+                            return
+                            
+                        cfg = utils.load_config()
+                        ip = cfg.get("dwarf_ip", "192.168.88.1")
+                        module_dwarf_control.dwarf_ctrl.setup_session(ip)
+                        
+                        panel = ctk.CTkToplevel(self)
+                        panel.title(f"Dwarf Control: {n}")
+                        panel.geometry("450x710") 
+                        panel.attributes("-topmost", True)
+                        
+                        ctk.CTkLabel(panel, text=f"Ziel: {n}", font=("Arial", 18, "bold"), text_color="#f39c12").pack(pady=(15,0))
+                        lbl_conn = ctk.CTkLabel(panel, text="🟡 Verbinde...", font=("Arial", 12, "bold"), text_color="#f1c40f")
+                        lbl_conn.pack(pady=(0,2))
+                        lbl_stats = ctk.CTkLabel(panel, text="🔋 --%  |  🌡️ --°C  |  Fokus: --", font=("Arial", 11, "bold"), text_color="gray")
+                        lbl_stats.pack(pady=(0, 10))
+                        
+                        btn_goto = ctk.CTkButton(panel, text="1. Teleskop ausrichten (GoTo)", fg_color="#2980b9", text_color="white", text_color_disabled="white", height=35)
+                        btn_goto.pack(fill="x", padx=20, pady=5)
+                        
+                        act_frame = ctk.CTkFrame(panel)
+                        act_frame.pack(fill="x", padx=20, pady=10)
+                        ctk.CTkLabel(act_frame, text="Aktionen", font=("Arial", 11, "bold")).grid(row=0, column=0, columnspan=2, pady=5)
+                        
+                        btn_stop_goto = ctk.CTkButton(act_frame, text="Stop GoTo", fg_color="transparent", border_width=1)
+                        btn_focus = ctk.CTkButton(act_frame, text="Autofokus (∞)", fg_color="transparent", border_width=1)
+                        btn_calib = ctk.CTkButton(act_frame, text="Kalibrieren", fg_color="transparent", border_width=1)
+                        btn_eq = ctk.CTkButton(act_frame, text="EQ Solving", fg_color="transparent", border_width=1)
+                        btn_light = ctk.CTkButton(act_frame, text="Licht (An/Aus)", fg_color="transparent", border_width=1)
+                        btn_reboot = ctk.CTkButton(act_frame, text="Reboot", fg_color="transparent", text_color="#e74c3c", border_color="#e74c3c", border_width=1, hover_color="#3e1a1a")
+                        
+                        btn_focus.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+                        btn_calib.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+                        btn_stop_goto.grid(row=2, column=0, padx=5, pady=5, sticky="ew")
+                        btn_light.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+                        btn_eq.grid(row=3, column=0, padx=5, pady=5, sticky="ew")
+                        btn_reboot.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
+                        
+                        act_frame.grid_columnconfigure(0, weight=1); act_frame.grid_columnconfigure(1, weight=1)
+
+                        set_frame = ctk.CTkFrame(panel)
+                        set_frame.pack(fill="x", padx=20, pady=5)
+                        
+                        ctk.CTkLabel(set_frame, text="Belichtung:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
+                        cmb_exp = ctk.CTkComboBox(set_frame, values=["1", "5", "10", "15", "30", "45", "60", "90", "120"], width=80)
+                        cmb_exp.set("30")
+                        cmb_exp.grid(row=0, column=1, padx=10, pady=5)
+                        
+                        ctk.CTkLabel(set_frame, text="Gain:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
+                        cmb_gain = ctk.CTkComboBox(set_frame, values=["40", "60", "80", "100", "120", "150", "180"], width=80)
+                        cmb_gain.set("60")
+                        cmb_gain.grid(row=1, column=1, padx=10, pady=5)
+                        
+                        ctk.CTkLabel(set_frame, text="Filter:").grid(row=2, column=0, padx=10, pady=5, sticky="w")
+                        cmb_filter = ctk.CTkComboBox(set_frame, values=["Astro Filter", "Duo-Band Filter", "DARK"], width=120)
+                        cmb_filter.set("Astro Filter")
+                        cmb_filter.grid(row=2, column=1, padx=10, pady=5)
+
+                        cap_frame = ctk.CTkFrame(panel, fg_color="transparent")
+                        cap_frame.pack(fill="x", padx=20, pady=10)
+                        
+                        btn_start = ctk.CTkButton(cap_frame, text="▶ Aufnahme Start", fg_color="#27ae60", text_color="white", text_color_disabled="white")
+                        btn_stop = ctk.CTkButton(cap_frame, text="⏹ Stop Capture", fg_color="#c0392b", text_color="white", text_color_disabled="white")
+                        
+                        btn_start.pack(side="left", expand=True, padx=5)
+                        btn_stop.pack(side="right", expand=True, padx=5)
+                        
+                        stream_frame = ctk.CTkFrame(panel, fg_color="transparent")
+                        stream_frame.pack(fill="x", padx=20, pady=(0, 10))
+                        
+                        ctk.CTkLabel(stream_frame, text="VLC Stream:", font=("Arial", 11, "bold")).pack(side="left", padx=(0, 5))
+                        stream_url = f"rtsp://{ip}/ch0/stream0"
+                        ent_stream = ctk.CTkEntry(stream_frame, font=("Consolas", 11), text_color="gray")
+                        ent_stream.insert(0, stream_url)
+                        ent_stream.configure(state="readonly")
+                        ent_stream.pack(side="left", fill="x", expand=True, padx=5)
+                        
+                        btn_copy_s = ctk.CTkButton(stream_frame, text="📋", width=30, fg_color="#34495e")
+                        btn_copy_s.pack(side="right")
+                        
+                        elements = [btn_goto, btn_stop_goto, btn_focus, btn_calib, btn_eq, btn_light, btn_reboot, cmb_exp, cmb_gain, cmb_filter, btn_start, btn_stop]
+                        for el in elements: el.configure(state="disabled")
+
+                        def do_goto():
+                            btn_goto.configure(state="disabled", text="⏳ Fahre an...")
+                            def on_res(succ, msg):
+                                self.after(0, lambda: btn_goto.configure(state="normal", text="✅ GoTo beendet" if succ else "❌ GoTo Fehler", fg_color="#27ae60" if succ else "#c0392b"))
+                                if not succ: self.after(0, lambda: messagebox.showerror("Dwarf", msg))
+                            module_dwarf_control.dwarf_ctrl.goto_target(r, d, n, on_res)
+                        btn_goto.configure(command=do_goto)
+
+                        def bind_action(btn, action_func, orig_text, load_text):
+                            def cmd():
+                                btn.configure(state="disabled", text=load_text, text_color_disabled="white")
+                                def on_res(succ, msg):
+                                    self.after(0, lambda: btn.configure(state="normal", text=orig_text))
+                                    if not succ: self.after(0, lambda: messagebox.showerror("Dwarf", msg))
+                                action_func(on_res)
+                            btn.configure(command=cmd)
+
+                        bind_action(btn_stop_goto, module_dwarf_control.dwarf_ctrl.stop_goto, "Stop GoTo", "⏳ Stoppe...")
+                        bind_action(btn_focus, module_dwarf_control.dwarf_ctrl.focus_infinite, "Autofokus (∞)", "⏳ Fokussiere...")
+                        bind_action(btn_calib, module_dwarf_control.dwarf_ctrl.calibrate, "Kalibrieren", "⏳ Kalibriere...")
+                        bind_action(btn_eq, module_dwarf_control.dwarf_ctrl.eq_solving, "EQ Solving", "⏳ Solving...")
+                        bind_action(btn_light, module_dwarf_control.dwarf_ctrl.toggle_lights, "Licht (An/Aus)", "⏳ Schalte...")
+                        bind_action(btn_reboot, module_dwarf_control.dwarf_ctrl.reboot, "Reboot", "⏳ Neustart...")
+
+                        def do_start():
+                            btn_start.configure(state="disabled", text="⏳ Starte...")
+                            f_val = cmb_filter.get()
+                            ir_idx = 0 if f_val == "DARK" else (1 if f_val == "Astro Filter" else 2)
+                            def on_res(succ, msg):
+                                if succ:
+                                    self.after(0, lambda: btn_stop.configure(state="normal"))
+                                else:
+                                    self.after(0, lambda: btn_start.configure(text="▶ Aufnahme Start", state="normal"))
+                                    self.after(0, lambda: messagebox.showerror("Fehler", msg))
+                            module_dwarf_control.dwarf_ctrl.start_capture(cmb_exp.get(), int(cmb_gain.get()), ir_idx, on_res)
+                        btn_start.configure(command=do_start)
+                        
+                        def do_stop():
+                            btn_stop.configure(state="disabled", text="⏳...")
+                            def on_res(succ, msg):
+                                self.after(0, lambda: btn_start.configure(text="▶ Aufnahme Start", state="normal", fg_color="#27ae60", text_color="white"))
+                                self.after(0, lambda: btn_stop.configure(text="⏹ Stop Capture", state="disabled", text_color="white"))
+                            module_dwarf_control.dwarf_ctrl.stop_capture(on_res)
+                        btn_stop.configure(command=do_stop)
+
+                        def copy_url():
+                            self.winfo_toplevel().clipboard_clear()
+                            self.winfo_toplevel().clipboard_append(stream_url)
+                            btn_copy_s.configure(text="✅", fg_color="#27ae60")
+                            self.after(2000, lambda: btn_copy_s.configure(text="📋", fg_color="#34495e"))
+                        btn_copy_s.configure(command=copy_url)
+
+                        def poll_status():
+                            if not panel.winfo_exists(): return
+                            st = module_dwarf_control.dwarf_ctrl.get_status()
+                            if st:
+                                b = st.get('BatteryLevelDwarf')
+                                t = st.get('TemperatureLevelDwarf')
+                                f = st.get('FocusValueDwarf')
+                                bat = f"{b}%" if b is not None else "--%"
+                                tmp = f"{t}°C" if t is not None else "--°C"
+                                foc = f"{f}" if f is not None else "--"
+                                lbl_stats.configure(text=f"🔋 {bat}  |  🌡️ {tmp}  |  Fokus: {foc}")
+                                
+                                if st.get('needsContinueShooting'):
+                                    module_dwarf_control.dwarf_ctrl.confirm_continue()
+                                
+                                if st.get('AstroCapture') or st.get('takePhotoStarted'):
+                                    cnt = st.get('takePhotoCount', 0)
+                                    stk = st.get('takePhotoStacked', 0)
+                                    btn_start.configure(text=f"📸 {cnt} Bilder (Gestackt: {stk})", state="disabled")
+                                    btn_stop.configure(state="normal")
+                                else:
+                                    if btn_start.cget("text").startswith("📸"):
+                                        btn_start.configure(text="▶ Aufnahme Start", state="normal", fg_color="#27ae60", text_color="white")
+                                        btn_stop.configure(text="⏹ Stop Capture", state="disabled", text_color="white")
+                                    
+                            panel.after(1500, poll_status)
+
+                        def on_connect_res(succ, msg):
+                            if succ:
+                                self.after(0, lambda: lbl_conn.configure(text="🟢 Connected", text_color="#2ecc71"))
+                                for el in elements:
+                                    if el != btn_stop:
+                                        self.after(0, lambda e=el: e.configure(state="normal"))
+                                poll_status() 
+                            else:
+                                self.after(0, lambda: lbl_conn.configure(text=f"🔴 {msg}", text_color="#e74c3c"))
+                                
+                        module_dwarf_control.dwarf_ctrl.connect_and_init(on_connect_res)
+                        
+                        def on_close():
+                            module_dwarf_control.dwarf_ctrl.disconnect()
+                            panel.destroy()
+                        
+                        btn_disconnect = ctk.CTkButton(panel, text="🔌 Verbindung trennen & Schließen", fg_color="#7f8c8d", hover_color="#95a5a6", text_color="white", text_color_disabled="white", command=on_close)
+                        btn_disconnect.pack(fill="x", padx=20, pady=(10, 5))
+                        
+                        panel.protocol("WM_DELETE_WINDOW", on_close)
+
+                    btn_dwarf.configure(command=open_dwarf_panel)
+                    btn_dwarf.pack(side="left", padx=5)
                 
                 if item["note"]: ctk.CTkLabel(left_block, text=f"📝 {item['note']}", font=("Arial", 12), text_color="gray", anchor="w", justify="left").pack(fill="x")
 
@@ -1269,12 +1745,7 @@ class ObsListFrame(ctk.CTkFrame):
             messagebox.showinfo("Export-Pfad", "Bitte wähle deinen Cloud-Ordner (Google Drive, iCloud, Dropbox), damit du die Datei auf dem Handy öffnen kannst.")
             export_dir = filedialog.askdirectory(title="Cloud Ordner auswählen")
             if not export_dir: return
-            
-            cfg["export_path"] = export_dir
-            try:
-                with open("smartsuite_config.json", "w") as f:
-                    json.dump(cfg, f, indent=4)
-            except: pass
+            utils.save_config("export_path", export_dir)
             
         html_file = os.path.join(export_dir, "Astro_Mobile_Dashboard.html")
         now_str = datetime.now().strftime('%d.%m.%Y, %H:%M')
@@ -1282,7 +1753,6 @@ class ObsListFrame(ctk.CTkFrame):
         lat = float(cfg.get("default_lat", 51.16))
         lon = float(cfg.get("default_lon", 10.45))
         
-        # Sicheres Parsen der Höhe
         try:
             ele_raw = str(cfg.get("default_elevation", "0")).replace(',', '.').replace('m', '').replace('M', '').strip()
             elevation = float(ele_raw) if ele_raw else 0.0
@@ -1322,22 +1792,22 @@ class ObsListFrame(ctk.CTkFrame):
             if is_circumpolar: return f"Ganzjährig (Beste Zeit: {period}) | {alt_str} | {opt_str}"
             else: return f"{period} | {alt_str} | {opt_str}"
 
-        now = datetime.now()
+        local_tz = pytz.timezone('Europe/Berlin')
+        now = datetime.now(local_tz)
         start_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
         if now.hour < 12: 
             start_time -= timedelta(days=1)
             
         time_labels = []
-        times = []
+        times_utc = []
         for i in range(25): 
             t = start_time + timedelta(minutes=30*i)
-            times.append(t)
             time_labels.append(t.strftime("%H:%M"))
+            times_utc.append(t.astimezone(pytz.utc))
             
-        astro_times = Time(times)
+        astro_times = Time(times_utc)
         frame = AltAz(obstime=astro_times, location=loc)
 
-        # --- HTML FÜR DEN PLAN GENERIEREN ---
         plan_html = ""
         if not night_plans.get("Süd") and not night_plans.get("Nord"):
             plan_html = "<p style='text-align:center; color:#888; margin-top:30px;'>Kein Teleskop-Plan möglich<br><br>(Keine Dunkelheit, Liste leer oder keine Objekte hoch genug)</p>"
@@ -1450,7 +1920,6 @@ class ObsListFrame(ctk.CTkFrame):
         .sync-time {{ font-size: 11px; color: #555; }}
         .subtitle {{ font-size: 14px; color: #888; }}
         
-        /* Bottom Navigation */
         .bottom-nav {{ position: fixed; bottom: 0; left: 0; width: 100%; background: #1e1e1e; display: flex; border-top: 1px solid #333; z-index: 100; padding-bottom: env(safe-area-inset-bottom); }}
         .nav-btn {{ flex: 1; padding: 10px 5px; text-align: center; color: #888; text-decoration: none; font-size: 13px; font-weight: bold; background: none; border: none; outline: none; }}
         .nav-btn.active {{ color: #3498db; border-top: 2px solid #3498db; background-color: rgba(52, 152, 219, 0.1); }}
@@ -1458,13 +1927,11 @@ class ObsListFrame(ctk.CTkFrame):
         .tab-content {{ display: none; }}
         .tab-content.active {{ display: block; }}
         
-        /* Plan Styling */
         .plan-card {{ background-color: #1e1e1e; border-left: 4px solid #2ecc71; padding: 15px; margin-bottom: 12px; border-radius: 8px; border-top: 1px solid #333; border-right: 1px solid #333; border-bottom: 1px solid #333; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }}
         .plan-time {{ color: #f39c12; font-family: Consolas, monospace; font-weight: bold; font-size: 15px; margin: 0 0 8px 0; }}
         .plan-target {{ color: #ecf0f1; font-weight: bold; font-size: 17px; margin: 0 0 5px 0; line-height: 1.3; }}
         .plan-alt {{ color: #7f8c8d; font-size: 13px; margin: 0; }}
         
-        /* Event Styling */
         .event-card {{ background-color: #1e1e1e; border-radius: 16px; padding: 15px; margin-bottom: 15px; border: 1px solid #333; display: flex; align-items: center; }}
         .e-icon {{ font-size: 28px; margin-right: 15px; min-width: 40px; text-align:center; }}
         .e-date {{ color: #3498db; font-weight: bold; font-size: 16px; margin:0; }}
@@ -1472,7 +1939,6 @@ class ObsListFrame(ctk.CTkFrame):
         .e-title {{ font-size: 16px; font-weight: bold; margin: 0 0 4px 0; }}
         .e-desc {{ font-size: 13px; color: #aaa; margin: 0; line-height: 1.4; }}
         
-        /* Target Styling */
         .card {{ background-color: #1e1e1e; border-radius: 16px; padding: 15px; margin-bottom: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); border: 1px solid #333; }}
         .card h2 {{ margin: 0 0 5px 0; font-size: 20px; color: #ecf0f1; }}
         .coords {{ color: #95a5a6; font-size: 12px; margin: 0 0 5px 0; font-family: Consolas, monospace; }}
@@ -1493,13 +1959,11 @@ class ObsListFrame(ctk.CTkFrame):
         <div class="sync-time">Letzter Sync: {now_str} Uhr</div>
     </div>
 
-    <!-- TAB 1: HEUTE NACHT (PLAN) -->
     <div id="tab-plan" class="tab-content active">
         <h2 style="font-size: 18px; color: #2ecc71; margin-bottom: 15px; border-bottom: 1px solid #333; padding-bottom: 10px;">Teleskop-Plan (je 1,5 Std)</h2>
         {plan_html}
     </div>
 
-    <!-- TAB 2: ZIELE -->
     <div id="tab-targets" class="tab-content">
 """
         if chart_id == 0:
@@ -1510,7 +1974,6 @@ class ObsListFrame(ctk.CTkFrame):
         html += """
     </div>
 
-    <!-- TAB 3: KALENDER -->
     <div id="tab-events" class="tab-content">
 """
         if not events:
@@ -1530,7 +1993,6 @@ class ObsListFrame(ctk.CTkFrame):
         html += f"""
     </div>
 
-    <!-- BOTTOM NAV -->
     <div class="bottom-nav">
         <button class="nav-btn active" onclick="switchTab('plan', this)">✨ Heute</button>
         <button class="nav-btn" onclick="switchTab('targets', this)">🔭 Ziele</button>
@@ -1582,7 +2044,7 @@ class ObsListFrame(ctk.CTkFrame):
         if exp_dir and os.path.isdir(exp_dir):
             html_file = os.path.join(exp_dir, "smartsuite_druckansicht.html")
         else:
-            html_file = os.path.abspath("smartsuite_druckansicht.html")
+            html_file = _app_path("smartsuite_druckansicht.html")
         
         html = f"""<html><head><meta charset="utf-8"><title>Astro Planungs-Dashboard</title><style>
                 body {{ font-family: 'Segoe UI', Arial, sans-serif; padding: 20px; max-width: 900px; margin: 0 auto; color: #222; background: #fff; }}

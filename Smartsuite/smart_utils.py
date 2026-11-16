@@ -8,10 +8,16 @@ import re
 import webbrowser
 import logging
 import sys
+import urllib.request
 from astropy.io import fits
 from astropy.coordinates import SkyCoord
 import astropy.units as u
-import urllib.request 
+
+def get_base_dir():
+    """Liefert immer den echten Programmordner (unabhängig vom Arbeitsverzeichnis)."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 # --- LOGGER SETUP ---
 def setup_logger():
@@ -22,7 +28,8 @@ def setup_logger():
         
         # Datei-Handler für persistentes Logging
         try:
-            file_handler = logging.FileHandler('smartsuite.log', encoding='utf-8')
+            log_path = os.path.join(get_base_dir(), 'smartsuite.log')
+            file_handler = logging.FileHandler(log_path, encoding='utf-8')
             file_handler.setLevel(logging.INFO)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
@@ -40,24 +47,21 @@ def setup_logger():
 log = setup_logger()
 
 # --- KONFIGURATION ---
-CONFIG_FILE = "smartsuite_config.json"
+CONFIG_FILE = os.path.join(get_base_dir(), "smartsuite_config.json")
 VERSION_FILE_URL = "https://drive.google.com/uc?export=download&id=1OGcf3RoHc6meVa4YP593j-bV2dpD7Cxy"
 UPDATE_FOLDER_URL = "https://drive.google.com/drive/folders/1jlE5gaClIDqibH2HbMKIfiXzKq9CF1Tg"
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, 'r') as f: 
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f: 
                 data = json.load(f)
                 
-                # --- NEU: KUGELSICHERER KOMMA-CHECK ---
-                # Falls sich in der JSON noch ein Komma eingeschlichen hat, 
-                # wird es beim Laden direkt "on the fly" in einen Punkt verwandelt.
+                # Komma-Check für Koordinaten
                 if "default_lat" in data and isinstance(data["default_lat"], str):
                     data["default_lat"] = data["default_lat"].replace(",", ".")
                 if "default_lon" in data and isinstance(data["default_lon"], str):
                     data["default_lon"] = data["default_lon"].replace(",", ".")
-                # ----------------------------------------
                     
                 return data
         except Exception as e:
@@ -67,27 +71,20 @@ def load_config():
 def save_config(key, value):
     data = load_config()
     
-    # --- NEU: KUGELSICHERER KOMMA-CHECK ---
-    # Falls der Nutzer in den Einstellungen ein Komma tippt, 
-    # korrigieren wir das sofort, bevor es gespeichert wird!
+    # Komma-Check für Koordinaten
     if key in ["default_lat", "default_lon"] and isinstance(value, str):
         value = value.replace(",", ".")
-    # ----------------------------------------
         
     data[key] = value
     try:
-        with open(CONFIG_FILE, 'w') as f: json.dump(data, f)
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
     except Exception as e:
         log.error(f"Fehler beim Speichern der Config-Datei (Key: {key}): {e}")
         
 def get_data_dir():
     """Erstellt und liefert den Pfad zum AstroData-Ordner für Caches und Ephemeriden."""
-    if getattr(sys, 'frozen', False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-    
-    d = os.path.join(base, "AstroData")
+    d = os.path.join(get_base_dir(), "AstroData")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -184,9 +181,9 @@ def analyze_header(path):
             
             ra = hdr.get('RA'); dec = hdr.get('DEC')
             c = "Unknown"
-            if ra and dec:
+            if ra is not None and dec is not None:
                 try: 
-                    c = SkyCoord(ra=ra, dec=dec, unit=(u.deg, u.deg)).get_constellation()
+                    c = SkyCoord(ra=float(ra), dec=float(dec), unit=(u.deg, u.deg)).get_constellation()
                 except Exception as e:
                     log.debug(f"Konnte Sternbild für Koordinaten {ra}/{dec} nicht ermitteln: {e}")
             
@@ -217,26 +214,22 @@ def apply_nina_fix(filepath):
     return False
 
 # --- UPDATE LOGIK (GITHUB INTEGRATION) ---
-GITHUB_USER = "SteffSarek" # <-- HIER DEINEN GITHUB NAMEN EINTRAGEN (z.B. "StefanAstro")
-GITHUB_REPO = "SmartSuite"     # Der Name deines Repositories auf Github
+GITHUB_USER = "SteffSarek"
+GITHUB_REPO = "SmartSuite"
 
 def get_remote_version():
     """Lädt die Versionsnummer vom aktuellsten GitHub Release."""
-    import json
-    import urllib.request
     url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/releases/latest"
     try:
-        # GitHub API verlangt einen User-Agent Header, sonst wird die Anfrage blockiert
         req = urllib.request.Request(url, headers={'User-Agent': 'SmartSuite-App'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
-            return data.get("tag_name", "") # Liefert den Namen deines Tags, z.B. "v1.1" oder "1.1"
+            return data.get("tag_name", "")
     except Exception as e:
         log.error(f"GitHub Update-Check Fehler: Konnte externe Version nicht abrufen. Grund: {e}")
         return None
 
 def open_update_folder():
     """Öffnet die Release-Seite auf GitHub im Standard-Browser."""
-    import webbrowser
     url = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}/releases/latest"
     webbrowser.open(url)

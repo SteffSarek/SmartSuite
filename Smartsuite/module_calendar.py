@@ -47,9 +47,10 @@ import numpy as np
 import pytz
 import json
 import time
+import requests
 
 import ephem
-from skyfield.api import Loader, wgs84
+from skyfield.api import Loader, wgs84, EarthSatellite
 
 import smart_utils as utils
 import module_obs_list
@@ -193,17 +194,19 @@ class AstroCalendarFrame(ctk.CTkFrame):
         all_events = events_iss + events_year
         all_events.sort(key=lambda x: x["time"])
         
-        try:
-            cache_save = []
-            for ev in all_events:
-                ev_copy = ev.copy()
-                ev_copy["time"] = ev_copy["time"].isoformat()
-                cache_save.append(ev_copy)
-            with open(CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump({"timestamp": time.time(), "events": cache_save}, f, indent=4)
-            print("Cache erfolgreich aktualisiert.")
-        except Exception as e: 
-            print(f"Cache Save Error: {e}")
+        has_iss_error = any(ev.get("title") == "Fehler bei ISS-Berechnung" for ev in all_events)
+        if not has_iss_error:
+            try:
+                cache_save = []
+                for ev in all_events:
+                    ev_copy = ev.copy()
+                    ev_copy["time"] = ev_copy["time"].isoformat()
+                    cache_save.append(ev_copy)
+                with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"timestamp": time.time(), "events": cache_save}, f, indent=4)
+                print("Cache erfolgreich aktualisiert.")
+            except Exception as e: 
+                print(f"Cache Save Error: {e}")
             
         self._calc_result = all_events
 
@@ -298,18 +301,52 @@ class AstroCalendarFrame(ctk.CTkFrame):
             observer = earth + topos
             
             print("Prüfe Aktualität der ISS Stationsdaten...")
-            stations_url = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle'
             stations_file = os.path.join(utils.get_data_dir(), 'stations_new.txt')
-            do_reload = False
-            
-            if not os.path.exists(stations_file) or (time.time() - os.path.getmtime(stations_file)) > 43200:
-                do_reload = True
-                print("Lade frisches TLE von Celestrak herunter...")
-            
-            satellites = sky_loader.tle_file(stations_url, filename=stations_file, reload=do_reload)
-            iss = {sat.name: sat for sat in satellites}.get('ISS (ZARYA)')
-            
-            if not iss: return events
+            need_download = (not os.path.exists(stations_file)) or ((time.time() - os.path.getmtime(stations_file)) > 43200)
+
+            if need_download:
+                print("Lade frische ISS-Bahndaten (TLE)...")
+                tle_urls = [
+                    'https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=tle',
+                    'https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle',
+                    'https://live.ariss.org/iss.txt',
+                ]
+                headers = {'User-Agent': 'SmartSuite/1.2.3'}
+                downloaded_ok = False
+                for url in tle_urls:
+                    try:
+                        r = requests.get(url, headers=headers, timeout=8)
+                        if r.status_code == 200 and '1 25544' in r.text and '2 25544' in r.text:
+                            with open(stations_file, 'w', encoding='utf-8') as f:
+                                f.write(r.text)
+                            downloaded_ok = True
+                            print(f"TLE erfolgreich geladen von: {url}")
+                            break
+                        else:
+                            print(f"TLE-Quelle lieferte Status {r.status_code}: {url}")
+                    except Exception as req_err:
+                        print(f"TLE-Quelle nicht erreichbar ({url}): {req_err}")
+
+                if not downloaded_ok and os.path.exists(stations_file):
+                    print("Warnung: Online-TLE fehlgeschlagen, nutze vorhandenen lokalen Cache.")
+
+            if not os.path.exists(stations_file):
+                raise RuntimeError("Keine ISS-Bahndaten verfügbar (Download fehlgeschlagen und kein lokaler Cache vorhanden).")
+
+            with open(stations_file, 'r', encoding='utf-8', errors='ignore') as f:
+                tle_lines = [ln.strip() for ln in f if ln.strip()]
+
+            line1 = line2 = None
+            for idx, ln in enumerate(tle_lines):
+                if ln.startswith('1 25544') and idx + 1 < len(tle_lines) and tle_lines[idx + 1].startswith('2 25544'):
+                    line1 = ln
+                    line2 = tle_lines[idx + 1]
+                    break
+
+            if not line1 or not line2:
+                raise RuntimeError("ISS-TLE (25544) konnte in den Bahndaten nicht gefunden werden.")
+
+            iss = EarthSatellite(line1, line2, 'ISS (ZARYA)', ts)
                 
             print("Suche nach ISS Ueberfluegen...")
             t_pass, events_pass = iss.find_events(topos, t0, t1, altitude_degrees=5.0)
